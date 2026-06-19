@@ -30,24 +30,28 @@ with tab1:
                 
                 df.columns = df.columns.str.strip()
                 
-                # Dynamic Header Match
+                # Dynamic Case-Insensitive Header Matching
                 hsn_col = next((c for c in df.columns if c.lower() in ['hsn code', 'hsn/sac', 'hsn']), None)
-                igst_col = next((c for c in df.columns if c.upper() == 'IGST'), None)
-                cgst_col = next((c for c in df.columns if c.upper() == 'CGST'), None)
-                sgst_col = next((c for c in df.columns if c.upper() == 'SGST'), None)
+                igst_col = next((c for c in df.columns if c.lower() in ['igst', 'igst rate', 'igstamt']), None)
+                cgst_col = next((c for c in df.columns if c.lower() in ['cgst', 'cgst rate', 'cgstamt']), None)
+                sgst_col = next((c for c in df.columns if c.lower() in ['sgst', 'sgst rate', 'sgstamt']), None)
                 
                 if not hsn_col:
-                    st.error("❌ Could not find an HSN column in this report. Please check the column names.")
+                    st.error("❌ Could not find an HSN column in this report. Please check your file headers.")
                 else:
-                    # Calculate Tax Rates
-                    df['IGST'] = pd.to_numeric(df['IGST'], errors='coerce').fillna(0)
-                    df['CGST'] = pd.to_numeric(df['CGST'], errors='coerce').fillna(0)
-                    df['SGST'] = pd.to_numeric(df['SGST'], errors='coerce').fillna(0)
+                    # Parse and convert found tax columns safely
+                    df['IGST_Cleaned'] = pd.to_numeric(df[igst_col], errors='coerce').fillna(0) if igst_col else 0.0
+                    df['CGST_Cleaned'] = pd.to_numeric(df[cgst_col], errors='coerce').fillna(0) if cgst_col else 0.0
+                    df['SGST_Cleaned'] = pd.to_numeric(df[sgst_col], errors='coerce').fillna(0) if sgst_col else 0.0
                     
-                    df['Total Tax Rate'] = df['IGST'] + df['CGST'] + df['SGST']
+                    # Calculate and normalize Total Tax Rate
+                    df['Total Tax Rate'] = df['IGST_Cleaned'] + df['CGST_Cleaned'] + df['SGST_Cleaned']
                     df['Total Tax Rate'] = df['Total Tax Rate'].apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
                     
-                    # Clean and pad HSN
+                    # Drop temporary workspace columns
+                    df.drop(columns=['IGST_Cleaned', 'CGST_Cleaned', 'SGST_Cleaned'], errors='ignore', inplace=True)
+                    
+                    # Clean and pad HSN codes
                     def clean_hsn_func(val):
                         if pd.isna(val) or str(val).strip() == "" or str(val).lower() == "missing hsn":
                             return "Missing HSN"
@@ -68,11 +72,12 @@ with tab1:
                             curr = row['Total Tax Rate']
                             dom = majority_tax_map.get(h, curr)
                             if dom != curr:
-                                if row['IGST'] > 0:
-                                    row['IGST'] = dom
+                                # Overwrite original custom-mapped headers if they exist
+                                if igst_col and pd.to_numeric(row[igst_col], errors='coerce').fillna(0) > 0:
+                                    row[igst_col] = dom
                                 else:
-                                    row['CGST'] = dom / 2
-                                    row['SGST'] = dom / 2
+                                    if cgst_col: row[cgst_col] = dom / 2
+                                    if sgst_col: row[sgst_col] = dom / 2
                                 row['Total Tax Rate'] = dom
                             return row
                             
@@ -123,19 +128,24 @@ with tab2:
                 df_m.columns = df_m.columns.str.strip()
                 df_p.columns = df_p.columns.str.strip()
                 
-                # Column Index Lookups
+                # Column Index Lookups (Case Insensitive)
                 m_hsn = next((c for c in df_m.columns if c.lower() in ['hsn code', 'hsn/sac', 'hsn']), "HSN Code")
                 m_sku = next((c for c in df_m.columns if c.lower() in ['sku', 'seller sku', 'product sku']), "SKU")
-                m_type = next((c for c in df_m.columns if c.lower() in ['transaction type', 'type', 'order status']), "Transaction Type")
+                m_type = next((c for c in df_m.columns if m.lower() in ['transaction type', 'type', 'order status']), "Transaction Type")
+                m_igst = next((c for c in df_m.columns if c.lower() in ['igst', 'igst rate']), None)
+                m_cgst = next((c for c in df_m.columns if c.lower() in ['cgst', 'cgst rate']), None)
+                m_sgst = next((c for c in df_m.columns if c.lower() in ['sgst', 'sgst rate']), None)
                 
                 p_sku = next((c for c in df_p.columns if c.lower() in ['sku', 'product sku', 'item code']), "SKU")
                 p_hsn = next((c for c in df_p.columns if c.lower() in ['correct hsn', 'hsn', 'hsn code']), "Correct HSN")
                 p_tax = next((c for c in df_p.columns if c.lower() in ['correct tax rate', 'tax rate', 'tax', 'gst rate']), "Correct Tax Rate")
                 
                 # Real-time sum total tax processing
-                for col in ['IGST', 'CGST', 'SGST']:
-                    df_m[col] = pd.to_numeric(df_m[col], errors='coerce').fillna(0)
-                df_m['Total Tax Rate'] = df_m['IGST'] + df_m['CGST'] + df_m['SGST']
+                m_igst_vals = pd.to_numeric(df_m[m_igst], errors='coerce').fillna(0) if m_igst else 0.0
+                m_cgst_vals = pd.to_numeric(df_m[m_cgst], errors='coerce').fillna(0) if m_cgst else 0.0
+                m_sgst_vals = pd.to_numeric(df_m[m_sgst], errors='coerce').fillna(0) if m_sgst else 0.0
+                
+                df_m['Total Tax Rate'] = m_igst_vals + m_cgst_vals + m_sgst_vals
                 df_m['Total Tax Rate'] = df_m['Total Tax Rate'].apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
                 
                 # Format master values cleanly
