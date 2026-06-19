@@ -33,23 +33,20 @@ with tab1:
                 # Dynamic Case-Insensitive Header Matching
                 hsn_col = next((c for c in df.columns if c.lower() in ['hsn code', 'hsn/sac', 'hsn']), None)
                 igst_col = next((c for c in df.columns if c.lower() in ['igst', 'igst rate', 'igstamt']), None)
-                cgst_col = next((c for c in df.columns if c.lower() in ['cgst', 'cgst rate', 'cgstamt']), None)
-                sgst_col = next((c for c in df.columns if c.lower() in ['sgst', 'sgst rate', 'sgstamt']), None)
+                let_cgst_col = next((c for c in df.columns if c.lower() in ['cgst', 'cgst rate', 'cgstamt']), None)
+                let_sgst_col = next((c for c in df.columns if c.lower() in ['sgst', 'sgst rate', 'sgstamt']), None)
                 
                 if not hsn_col:
                     st.error("❌ Could not find an HSN column in this report. Please check your file headers.")
                 else:
                     # Parse and convert found tax columns safely
-                    df['IGST_Cleaned'] = pd.to_numeric(df[igst_col], errors='coerce').fillna(0) if igst_col else 0.0
-                    df['CGST_Cleaned'] = pd.to_numeric(df[cgst_col], errors='coerce').fillna(0) if cgst_col else 0.0
-                    df['SGST_Cleaned'] = pd.to_numeric(df[sgst_col], errors='coerce').fillna(0) if sgst_col else 0.0
+                    igst_vals = pd.to_numeric(df[igst_col], errors='coerce').fillna(0.0) if igst_col else 0.0
+                    cgst_vals = pd.to_numeric(df[let_cgst_col], errors='coerce').fillna(0.0) if let_cgst_col else 0.0
+                    sgst_vals = pd.to_numeric(df[let_sgst_col], errors='coerce').fillna(0.0) if let_sgst_col else 0.0
                     
                     # Calculate and normalize Total Tax Rate
-                    df['Total Tax Rate'] = df['IGST_Cleaned'] + df['CGST_Cleaned'] + df['SGST_Cleaned']
-                    df['Total Tax Rate'] = df['Total Tax Rate'].apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
-                    
-                    # Drop temporary workspace columns
-                    df.drop(columns=['IGST_Cleaned', 'CGST_Cleaned', 'SGST_Cleaned'], errors='ignore', inplace=True)
+                    total_tax = igst_vals + cgst_vals + sgst_vals
+                    df['Total Tax Rate'] = total_tax.apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
                     
                     # Clean and pad HSN codes
                     def clean_hsn_func(val):
@@ -67,18 +64,22 @@ with tab1:
                         majority_tax = majority_tax.sort_values(by=[hsn_col, 'count', 'Total Tax Rate'], ascending=[True, False, False])
                         majority_tax_map = majority_tax.drop_duplicates(subset=[hsn_col]).set_index(hsn_col)['Total Tax Rate'].to_dict()
                         
+                        # Pre-convert columns to float to allow row assignments safely
+                        if igst_col: df[igst_col] = pd.to_numeric(df[igst_col], errors='coerce').fillna(0.0)
+                        if let_cgst_col: df[let_cgst_col] = pd.to_numeric(df[let_cgst_col], errors='coerce').fillna(0.0)
+                        if let_sgst_col: df[let_sgst_col] = pd.to_numeric(df[let_sgst_col], errors='coerce').fillna(0.0)
+
                         def fix_row(row):
                             h = row[hsn_col]
                             curr = row['Total Tax Rate']
                             dom = majority_tax_map.get(h, curr)
                             if dom != curr:
-                                # Overwrite original custom-mapped headers if they exist
-                                if igst_col and pd.to_numeric(row[igst_col], errors='coerce').fillna(0) > 0:
-                                    row[igst_col] = dom
+                                if igst_col and row[igst_col] > 0:
+                                    row[igst_col] = float(dom)
                                 else:
-                                    if cgst_col: row[cgst_col] = dom / 2
-                                    if sgst_col: row[sgst_col] = dom / 2
-                                row['Total Tax Rate'] = dom
+                                    if let_cgst_col: row[let_cgst_col] = float(dom / 2)
+                                    if let_sgst_col: row[let_sgst_col] = float(dom / 2)
+                                row['Total Tax Rate'] = int(dom)
                             return row
                             
                         df = df.apply(fix_row, axis=1)
@@ -131,7 +132,7 @@ with tab2:
                 # Column Index Lookups (Case Insensitive)
                 m_hsn = next((c for c in df_m.columns if c.lower() in ['hsn code', 'hsn/sac', 'hsn']), "HSN Code")
                 m_sku = next((c for c in df_m.columns if c.lower() in ['sku', 'seller sku', 'product sku']), "SKU")
-                m_type = next((c for c in df_m.columns if m.lower() in ['transaction type', 'type', 'order status']), "Transaction Type")
+                m_type = next((c for c in df_m.columns if c.lower() in ['transaction type', 'type', 'order status']), "Transaction Type")
                 m_igst = next((c for c in df_m.columns if c.lower() in ['igst', 'igst rate']), None)
                 m_cgst = next((c for c in df_m.columns if c.lower() in ['cgst', 'cgst rate']), None)
                 m_sgst = next((c for c in df_m.columns if c.lower() in ['sgst', 'sgst rate']), None)
@@ -141,17 +142,17 @@ with tab2:
                 p_tax = next((c for c in df_p.columns if c.lower() in ['correct tax rate', 'tax rate', 'tax', 'gst rate']), "Correct Tax Rate")
                 
                 # Real-time sum total tax processing
-                m_igst_vals = pd.to_numeric(df_m[m_igst], errors='coerce').fillna(0) if m_igst else 0.0
-                m_cgst_vals = pd.to_numeric(df_m[m_cgst], errors='coerce').fillna(0) if m_cgst else 0.0
-                m_sgst_vals = pd.to_numeric(df_m[m_sgst], errors='coerce').fillna(0) if m_sgst else 0.0
+                m_igst_vals = pd.to_numeric(df_m[m_igst], errors='coerce').fillna(0.0) if m_igst else 0.0
+                m_cgst_vals = pd.to_numeric(df_m[m_cgst], errors='coerce').fillna(0.0) if m_cgst else 0.0
+                m_sgst_vals = pd.to_numeric(df_m[m_sgst], errors='coerce').fillna(0.0) if m_sgst else 0.0
                 
-                df_m['Total Tax Rate'] = m_igst_vals + m_cgst_vals + m_sgst_vals
-                df_m['Total Tax Rate'] = df_m['Total Tax Rate'].apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
+                total_tax_m = m_igst_vals + m_cgst_vals + m_sgst_vals
+                df_m['Total Tax Rate'] = total_tax_m.apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
                 
                 # Format master values cleanly
                 df_p[p_sku] = df_p[p_sku].str.strip().str.lower()
                 df_p[p_hsn] = df_p[p_hsn].str.split('.').str[0].str.strip()
-                df_p[p_tax] = pd.to_numeric(df_p[p_tax], errors='coerce').fillna(0)
+                df_p[p_tax] = pd.to_numeric(df_p[p_tax], errors='coerce').fillna(0.0)
                 df_p[p_tax] = df_p[p_tax].apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
                 
                 master_sku_map = df_p.set_index(p_sku)[[p_hsn, p_tax]].to_dict(orient='index')
@@ -164,7 +165,7 @@ with tab2:
                 for _, r in df_m.iterrows():
                     h = ''.join(filter(str.isdigit, str(r.get(m_hsn, "")).split('.')[0].strip())) if pd.notna(r.get(m_hsn)) else ""
                     s = str(r.get(m_sku, "")).strip()
-                    t = r['Total Tax Rate']
+                    t = int(r['Total Tax Rate'])
                     if h and h != "" and h.lower() != "missing hsn":
                         hsn_tax_sets.setdefault(h, set()).add(t)
                         hsn_sku_sets.setdefault(h, set()).add(s)
@@ -176,7 +177,7 @@ with tab2:
                     sku = str(r.get(m_sku, "")).strip()
                     sku_lower = sku.lower()
                     tx_type = str(r.get(m_type, "")).lower() if pd.notna(r.get(m_type)) else ""
-                    tax = r['Total Tax Rate']
+                    tax = int(r['Total Tax Rate'])
                     row_num = idx + 2
                     
                     is_cancelled = "cancel" in tx_type or "return" in tx_type
@@ -187,15 +188,15 @@ with tab2:
                     if hsn:
                         if len(hsn) != 6 and len(hsn) != 8:
                             err6.append({"Row Index": row_num, "SKU": sku, "Invalid HSN Code": hsn, "Length": len(hsn), "Tax Rate": tax})
-                        if hsn in master_hsn_map and master_hsn_map[hsn] != tax:
-                            err3.append({"SKU": sku, "HSN Code": hsn, "Marketplace Tax": tax, "Master Expected Tax": master_hsn_map[hsn]})
+                        if hsn in master_hsn_map and int(master_hsn_map[hsn]) != tax:
+                            err3.append({"SKU": sku, "HSN Code": hsn, "Marketplace Tax": tax, "Master Expected Tax": int(master_hsn_map[hsn])})
                             
                     if sku_lower in master_sku_map:
                         truth = master_sku_map[sku_lower]
                         if hsn and truth[p_hsn] != hsn:
                             err4.append({"SKU": sku, "Marketplace HSN": hsn, "Master Correct HSN": truth[p_hsn], "Tax Rate": tax})
-                        if tax > 0 and truth[p_tax] != tax:
-                            err5.append({"SKU": sku, "HSN": hsn, "Marketplace Tax": tax, "Master Correct Tax Rate": truth[p_tax]})
+                        if tax > 0 and int(truth[p_tax]) != tax:
+                            err5.append({"SKU": sku, "HSN": hsn, "Marketplace Tax": tax, "Master Correct Tax Rate": int(truth[p_tax])})
                 
                 for hsn_code, tax_set in hsn_tax_sets.items():
                     if len(tax_set) > 1:
