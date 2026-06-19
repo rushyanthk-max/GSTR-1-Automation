@@ -152,7 +152,7 @@ with tab2:
                 hsn_tax_sets, hsn_sku_sets = {}, {}
                 
                 for _, r in df_m.iterrows():
-                    h = str(r.get(m_hsn, "")).split('.')[0].strip().replace(/[^0-9]/g, '') if pd.notna(r.get(m_hsn)) else ""
+                    h = ''.join(filter(str.isdigit, str(r.get(m_hsn, "")).split('.')[0].strip())) if pd.notna(r.get(m_hsn)) else ""
                     s = str(r.get(m_sku, "")).strip()
                     t = r['Total Tax Rate']
                     if h and h != "" and h.lower() != "missing hsn":
@@ -160,7 +160,7 @@ with tab2:
                         hsn_sku_sets.setdefault(h, set()).add(s)
                 
                 for idx, r in df_m.iterrows():
-                    hsn = str(r.get(m_hsn, "")).split('.')[0].strip() if pd.notna(r.get(m_hsn)) else ""
+                    hsn = ''.join(filter(str.isdigit, str(r.get(m_hsn, "")).split('.')[0].strip())) if pd.notna(r.get(m_hsn)) else ""
                     if hsn.lower() == "missing hsn" or hsn == "nan": hsn = ""
                     
                     sku = str(r.get(m_sku, "")).strip()
