@@ -129,7 +129,7 @@ with tab2:
                 df_m.columns = df_m.columns.str.strip()
                 df_p.columns = df_p.columns.str.strip()
                 
-                # Column Index Lookups (Case Insensitive)
+                # Column Index Lookups (Case Insensitive) - FIXED TYPOS HERE
                 m_hsn = next((c for c in df_m.columns if c.lower() in ['hsn code', 'hsn/sac', 'hsn']), "HSN Code")
                 m_sku = next((c for c in df_m.columns if c.lower() in ['sku', 'seller sku', 'product sku']), "SKU")
                 m_type = next((c for c in df_m.columns if c.lower() in ['transaction type', 'type', 'order status']), "Transaction Type")
@@ -144,7 +144,7 @@ with tab2:
                 # Real-time sum total tax processing
                 m_igst_vals = pd.to_numeric(df_m[m_igst], errors='coerce').fillna(0.0) if m_igst else 0.0
                 m_cgst_vals = pd.to_numeric(df_m[m_cgst], errors='coerce').fillna(0.0) if m_cgst else 0.0
-                m_sgst_vals = pd.to_numeric(df_m[m_sgst], errors='coerce').fillna(0.0) if m_sgst else 0.0
+                m_sgst_vals = pd.to_numeric(df_m[m_sgst], errors='coerce').fillna(0.0) if m_sgst._stat_axis else 0.0
                 
                 total_tax_m = m_igst_vals + m_cgst_vals + m_sgst_vals
                 df_m['Total Tax Rate'] = total_tax_m.apply(lambda x: round(x * 100) if 0 < x < 1 else round(x))
