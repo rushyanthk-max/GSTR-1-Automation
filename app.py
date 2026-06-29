@@ -7,7 +7,7 @@ import io
 st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="centered")
 
 st.title("📦 BCPL Universal E-commerce GST Sanitizer")
-st.write("Upload your reports to sanitize errors and instantly generate a **6-Sheet Compliance Audit Report**.")
+st.write("Upload your reports to sanitize errors and instantly generate a clickable **6-Sheet Compliance Audit Report**.")
 
 # Helper function to read any layout safely into raw text strings
 def load_data_safely(file_obj):
@@ -295,17 +295,20 @@ if uploaded_file:
             err_sheet_6 = df_raw.loc[error_indices_6]
 
             # =========================================================================
-            # 📥 GENERATE MULTI-SHEET EXCEL PACKET IN STREAM MEMORY
+            # 📥 FORCE native MULTI-SHEET EXCEL FORMAT (Fixed Parameter Blocks)
             # =========================================================================
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                err_sheet_1.to_excel(writer, sheet_name='1_Missing_HSNs_No_Cancels', index=False)
-                err_sheet_2.to_excel(writer, sheet_name='2_Double_Tax_Rates', index=False)
-                err_sheet_3.to_excel(writer, sheet_name='3_Invalid_Lengths_Not_6_or_8', index=False)
-                err_sheet_4.to_excel(writer, sheet_name='4_Wrong_Tax_Rates_by_HSN', index=False)
-                err_sheet_5.to_excel(writer, sheet_name='5_Wrong_HSNs_by_SKU', index=False)
-                err_sheet_6.to_excel(writer, sheet_name='6_Wrong_Tax_Rates_by_SKU', index=False)
+                err_sheet_1.to_excel(writer, sheet_name='Missing HSNs', index=False)
+                err_sheet_2.to_excel(writer, sheet_name='Double Tax Rates', index=False)
+                err_sheet_3.to_excel(writer, sheet_name='Invalid Lengths', index=False)
+                err_sheet_4.to_excel(writer, sheet_name='Wrong Rates by HSN', index=False)
+                err_sheet_5.to_excel(writer, sheet_name='Wrong HSNs by SKU', index=False)
+                err_sheet_6.to_excel(writer, sheet_name='Wrong Rates by SKU', index=False)
+            
+            # Structural pointer lock reset
             excel_buffer.seek(0)
+            excel_binary_data = excel_buffer.getvalue()
 
             # =========================================================================
             # 🚀 RUN LIVE PRODUCTION SANITIZATION (APPLY VOTE WINNERS)
@@ -342,14 +345,13 @@ if uploaded_file:
             # 🎨 RENDER STREAMLIT INTERFACE HUD
             # =========================================================================
             st.success(f"✨ Data Analytics Scan Complete! Cleaned {blank_rows} trailing layout gaps.")
-            
             st.info(f"📋 **Detected System Mappings:** \n* **Core Targets:** HSN (`{hsn_col}`) | SKU (`{sku_col}`) \n* **Tax Splits:** CGST (`{cgst_col}`), SGST (`{sgst_col}`), IGST (`{igst_col}`)")
             
-            # Download Box 1: The Multi-Sheet Audit Log
+            # Download Box 1: Verified Multi-Sheet Native XLSX Workbook
             st.error("⚠️ COMPLIANCE RISK DETECTED: Audit logs generated below!")
             st.download_button(
-                label="📥 Download 6-Sheet Audit Error Report",
-                data=excel_buffer,
+                label="📥 Download Clickable 6-Sheet Audit Excel Report",
+                data=excel_binary_data,
                 file_name=f"AUDIT_LOG_{uploaded_file.name.split('.')[0]}.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
