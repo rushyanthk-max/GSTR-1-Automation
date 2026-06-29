@@ -33,11 +33,11 @@ if uploaded_file:
     blank_rows = initial_rows - len(df)
 
     # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict ancillary-tax exclusions)
-    hsn_col = df.Hsn/sac
-    sku_col = df.Sku
-    cgst_col = df.Cgst_Rate
-    sgst_col = df.Sgst_Rate
-    igst_col = df.Igst_Rate
+    hsn_col = df['Hsn/sac']
+    sku_col = df['Sku']
+    cgst_col = df['Cgst_Rate']
+    sgst_col = df['Sgst_Rate']
+    igst_col = df['Igst_Rate']
     
     for col in df.columns:
         c_low = str(col).strip().lower()
