@@ -32,12 +32,12 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict ancillary-tax exclusions)
-    hsn_col = df['Hsn/sac']
-    sku_col = df['Sku']
-    cgst_col = df['Cgst_Rate']
-    sgst_col = df['Sgst_Rate']
-    igst_col = df['Igst_Rate']
+    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Strictly isolating Rate % vs Currency Amount)
+    hsn_col = None
+    sku_col = None
+    cgst_col = None
+    sgst_col = None
+    igst_col = None
     
     for col in df.columns:
         c_low = str(col).strip().lower()
@@ -50,14 +50,16 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-        # Target explicit individual tax components 
-        # 🛑 CRITICAL ELIMINATION: Block Shipping, Delivery, Gift Wrap, TCS, and financial currency amounts
-        if any(x in c_low for x in ['gift', 'wrap', 'shipping', 'delivery', 'ship', 'postage', 'tcs', 'amount', 'amt', 'value']):
+        # Target explicit individual tax components
+        # 🛑 CRITICAL ELIMINATION: Block shipping, gift wrap, TCS, and all currency amounts/values
+        if any(x in c_low for x in ['gift', 'wrap', 'shipping', 'delivery', 'ship', 'postage', 'tcs', 'amount', 'amt', 'value', 'tax paid', 'tax collected']):
             continue
 
-        if 'cgst' in c_low: cgst_col = col
-        if 'sgst' in c_low: sgst_col = col
-        if 'igst' in c_low: igst_col = col
+        # 🎯 STRICT REQUIREMENT: Must explicitly track the rate scale percentage 
+        if any(r in c_low for r in ['rate', 'percentage', '%', 'code']):
+            if 'cgst' in c_low: cgst_col = col
+            if 'sgst' in c_low: sgst_col = col
+            if 'igst' in c_low: igst_col = col
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
@@ -139,7 +141,7 @@ if uploaded_file:
                 valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes != "0") & (valid_taxes != "0.0")]
                 
                 if not valid_taxes.empty:
-                    # Extract the mathematical mode winner
+                    # Extract the mathematical mode winner (e.g., 18 or 5)
                     majority_tax_value = valid_taxes.value_counts().index[0]
                     
                     # Target any rows in this group that contradict the majority vote
@@ -175,7 +177,7 @@ if uploaded_file:
 
         # 5. RENDER INTERFACE SUCCESS DASHBOARD
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
-        st.info(f"🧬 **Dynamic Reconstruction Engine Connected:** \n* **Discovered Split Columns:** CGST ('{cgst_col if cgst_col else 'Not Found'}'), SGST ('{sgst_col if sgst_col else 'Not Found'}'), IGST ('{igst_col if igst_col else 'Not Found'}') \n* **Generated Verified Target:** 'Total Tax Rate' column successfully calculated from raw rows!")
+        st.info(f"🧬 **Dynamic Reconstruction Engine Connected:** \n* **Discovered Rate Columns:** CGST ('{cgst_col if cgst_col else 'Not Found'}'), SGST ('{sgst_col if sgst_col else 'Not Found'}'), IGST ('{igst_col if igst_col else 'Not Found'}') \n* **Generated Verified Target:** 'Total Tax Rate' column successfully calculated from raw rows!")
         
         if tax_corrections_made > 0:
             st.warning(f"⚖️ TAX AUTO-CORRECTION COMPLETE: Detected double tax rates! Overwrote **{tax_corrections_made} rows** inside your newly engineered **'Total Tax Rate'** column (and corresponding sub-components) to perfectly align with majority group rules!")
