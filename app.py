@@ -92,7 +92,6 @@ if uploaded_file:
                     if attr_hsn_col and attr_sku_col:
                         for _, row in attr_df.iterrows():
                             r_hsn = str(row[attr_hsn_col]).strip() if pd.notna(row[attr_hsn_col]) else ""
-                            # Apply clean string rules to attribute SKUs to slice out backticks
                             r_sku = clean_sku_string(row[attr_sku_col])
                             
                             if r_hsn.startswith('="') and r_hsn.endswith('"'): r_hsn = r_hsn[2:-1]
@@ -136,13 +135,10 @@ if uploaded_file:
                 val_clean = re.sub(r'[\s\-\.\/]', '', val)
                 val_clean = "".join(filter(str.isdigit, val_clean))
                 
-                # If HSN is missing, process fuzzy matching checks
                 if not val_clean or val_clean in ["", "nan", "none"]:
-                    # Look 1: Direct Match after stripping backticks
                     if sku_val in master_sku_hsn_map:
                         val_clean = master_sku_hsn_map[sku_val]
                         auto_filled_count += 1
-                    # Look 2: Fuzzy Match (Erase trailing letter from Amazon SKU)
                     elif len(sku_val) > 1 and sku_val[:-1] in master_sku_hsn_map:
                         val_clean = master_sku_hsn_map[sku_val[:-1]]
                         auto_filled_count += 1
@@ -211,7 +207,8 @@ if uploaded_file:
                                     split_str = str(int(new_total_num / 2)) if (new_total_num / 2).is_integer() else str(new_total_num / 2)
                                     df.loc[mismatched_rows, cgst_col] = split_str
                                     df.loc[mismatched_rows, sgst_col] = split_str
-                        except: pass
+                            except: 
+                                pass
 
             # PART F: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNS
             final_shielded_hsns = []
