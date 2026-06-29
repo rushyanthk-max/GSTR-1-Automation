@@ -21,7 +21,6 @@ sku_hsn_catalog = {
 uploaded_file = st.file_uploader("Upload your raw Excel or CSV report", type=["xlsx", "xls", "csv"])
 
 if uploaded_file:
-    # Force Pandas to read every cell as raw text string to protect zeroes
     if uploaded_file.name.endswith(('.xlsx', '.xls')):
         df = pd.read_excel(uploaded_file, dtype=str)
     else:
@@ -58,19 +57,22 @@ if uploaded_file:
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
-        st.info(f"⚡ Universal Auto-Detection Matrix Loaded! Processing files...")
-        
         # Deep clean columns safely
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
+        if tax_col:
+            df[tax_col] = df[tax_col].fillna("0").astype(str).str.strip()
         
-        # Process HSN codes cleanly without nested functions
-        cleaned_hsns = []
+        # PASS 1: Generate a TEMPORARY pure-numeric HSN column for perfect grouping calculations
+        pure_numeric_hsns = []
         for index, row in df.iterrows():
             val = str(row[hsn_col]).strip()
             sku_val = str(row[sku_col]).strip() if sku_col else ""
             
+            # CRITICAL: Strip off any pre-existing Excel equation formulas completely!
             if val.startswith('="') and val.endswith('"'):
                 val = val[2:-1]
+            elif val.startswith('='):
+                val = val.replace('=', '').replace('"', '')
                 
             val_clean = re.sub(r'[\s\-\.\/]', '', val)
             
@@ -84,26 +86,58 @@ if uploaded_file:
             if len(clean_digits) == 7:
                 clean_digits = "0" + clean_digits
                 
-            if clean_digits and clean_digits != "MISSING HSN":
-                cleaned_hsns.append(f'="{clean_digits}"')
+            if not clean_digits or val_clean == "MISSING HSN":
+                pure_numeric_hsns.append("MISSING HSN")
             else:
-                cleaned_hsns.append("MISSING HSN")
+                pure_numeric_hsns.append(clean_digits)
                 
-        df[hsn_col] = cleaned_hsns
+        df['_temp_hsn_pure'] = pure_numeric_hsns
 
-        # 5. DYNAMIC TAX RATE HARMONIZATION ENGINE (Flat majority logic execution)
+        # PASS 2: TAX RATE HARMONIZATION (Groups using the guaranteed pure numeric list)
         if tax_col:
-            df[tax_col] = df[tax_col].fillna("0").astype(str).str.strip()
-            # Group by HSN and replace tax data directly with the dominant group value
-            for hsn_val, group in df.groupby(hsn_col):
-                if hsn_val != "MISSING HSN" and not group[tax_col].empty:
-                    majority_tax = group[tax_col].value_counts().index[0]
-                    df.loc[df[hsn_col] == hsn_val, tax_col] = majority_tax
+            # Clean up the tax strings inside the data loop to prevent "18" vs "18.0" vs "18%" issues
+            def standardize_tax_values(val):
+                t = str(val).strip().upper().replace('%', '')
+                t = re.sub(r'\.0+$', '', t)
+                t = re.sub(r'[\s\-\.\/]', '', t)
+                if '18' in t or 'STANDARD' in t: return "18"
+                if '5' in t or 'REDUCED' in t or 'LOW' in t: return "5"
+                if '12' in t: return "12"
+                if '28' in t: return "28"
+                return t
+
+            df['_temp_tax_match'] = df[tax_col].apply(standardize_tax_values)
+
+            # Group by pure numeric HSN strings and replace tax data with the dominant true majority value
+            for hsn_val, group in df.groupby('_temp_hsn_pure'):
+                if hsn_val != "MISSING HSN" and not group['_temp_tax_match'].empty:
+                    majority_tax_value = group['_temp_tax_match'].value_counts().index[0]
+                    
+                    # Pull a sample style template of how the raw tax code looked for the majority
+                    sample_rows = group[group['_temp_tax_match'] == majority_tax_value]
+                    raw_style_template = str(df.loc[sample_rows.index[0], tax_col]).strip()
+                    
+                    # Force all rows in this group to match the raw format of the majority rate
+                    df.loc[df['_temp_hsn_pure'] == hsn_val, tax_col] = raw_style_template
+
+            df.drop(columns=['_temp_tax_match'], inplace=True)
+
+        # PASS 3: WRAP THE PADDED HSNS IN EXCEL TEXT SHIELDS FOR THE FINAL OUTPUT
+        final_shielded_hsns = []
+        for val in df['_temp_hsn_pure']:
+            if val == "MISSING HSN":
+                final_shielded_hsns.append("MISSING HSN")
+            else:
+                final_shielded_hsns.append(f'="{val}"')
+                
+        df[hsn_col] = final_shielded_hsns
+        df.drop(columns=['_temp_hsn_pure'], inplace=True) # Trash temp tracking column
 
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank rows.")
+        st.info(f"🎯 Target Matrix Connected -> HSN Column: '{hsn_col}' | Adjusted Tax Column: '{tax_col if tax_col else 'Not Found'}'")
             
     else:
-        st.error("❌ Column Detection Error: The script could not identify an HSN column name in your file.")
+        st.error("❌ Column Detection Error: The script could not automatically identify an HSN or Commodity column in this file layout.")
 
     st.write("### Data Preview Grid:")
     st.dataframe(df.head(50))
