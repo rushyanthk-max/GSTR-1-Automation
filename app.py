@@ -58,7 +58,7 @@ if uploaded_file:
             tax_col = col
             break
 
-    # Fallback to standard commercial rates (IGST/CGST/SGST tracking) if no explicit total header exists
+    # Fallback to standard commercial rates if no explicit total header exists
     if not tax_col:
         for col in df.columns:
             c_low = str(col).strip().lower()
@@ -121,15 +121,15 @@ if uploaded_file:
             for hsn_val, group in df.groupby('_temp_hsn_pure'):
                 if hsn_val != "MISSING HSN" and not group[tax_col].empty:
                     
-                    # Drop completely blank cells or system NaNs in this specific group
+                    # Drop completely blank cells or system NaNs in this specific group safely via string operations
                     valid_taxes = group[tax_col].dropna().astype(str).str.strip()
-                    valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes.lower() != "nan")]
+                    valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes.str.lower() != "nan")]
                     
                     if not valid_taxes.empty:
                         # Extract the mathematical mode winner (the value that shows up most often)
                         majority_tax_value = valid_taxes.value_counts().index[0]
                         
-                        # Find any rows in this specific HSN group that are not using the winning majority rate
+                        # Correctly check for variations row-by-row using direct element indexing
                         mismatched_rows = group.index[df.loc[group.index, tax_col].astype(str).str.strip() != majority_tax_value]
                         
                         # Count the corrections and apply the winner to the original tax column
