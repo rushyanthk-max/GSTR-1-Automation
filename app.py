@@ -32,7 +32,7 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict sub-tax exclusions)
+    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict split-tax exclusions)
     hsn_col = None
     sku_col = None
     tax_col = None
@@ -49,23 +49,23 @@ if uploaded_file:
             sku_col = col
 
     # STRICT TOTAL TAX RATE COLUMN DETECTOR
-    # Pass 1: Prioritize explicit "Total Tax" phrases while strictly discarding sub-components
+    # Pass 1: Prioritize explicit "Total Tax" phrases while strictly skipping split columns
     for col in df.columns:
         c_low = str(col).strip().lower()
         
-        # 🛑 CRITICAL ELIMINATION: Completely ignore sub-taxes, splits, and currency values
-        if any(x in c_low for x in ['cgst', 'sgst', 'tcs', 'amount', 'value', 'amt']):
+        # 🛑 CRITICAL ELIMINATION: Block split taxes (CGST, SGST, UTGST), TCS components, and currency amounts
+        if any(x in c_low for x in ['cgst', 'sgst', 'utgst', 'tcs', 'amount', 'value', 'amt']):
             continue  
             
         if any(k in c_low for k in ['total tax rate', 'tax percentage', 'tax rate', 'rate%', 'gst rate', 'tax_rate', 'gst%', 'igst rate', 'total tax']):
             tax_col = col
             break
 
-    # Pass 2: Secondary scan if no explicit total header phrase matched
+    # Pass 2: Secondary scan if no explicit total header phrase matched (keeping exclusions active)
     if not tax_col:
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if any(x in c_low for x in ['cgst', 'sgst', 'tcs', 'amount', 'value', 'amt']):
+            if any(x in c_low for x in ['cgst', 'sgst', 'utgst', 'tcs', 'amount', 'value', 'amt']):
                 continue
             if 'rate' in c_low or 'percentage' in c_low or '%' in c_low:
                 tax_col = col
