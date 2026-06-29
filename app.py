@@ -24,6 +24,7 @@ def deep_clean_sku(sku_val):
     if pd.isna(sku_val):
         return ""
     s = str(sku_val).strip().lower()
+    # Strip away backticks, spaces, dashes, hyphens, and punctuation entirely
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
@@ -31,10 +32,10 @@ def deep_clean_sku(sku_val):
 # 1. DUAL FILE UPLOADER COMPONENTS
 # =========================================================================
 st.subheader("1️⃣ Step 1: Upload Raw Transaction Report")
-uploaded_file = st.file_uploader("Drop your sales report here", type=["xlsx", "xls", "csv"], key="sales_report")
+uploaded_file = st.file_uploader("Drop your sales report here (Amazon, Flipkart, Nykaa, Meesho, JioMart, WMS)", type=["xlsx", "xls", "csv"], key="sales_report")
 
 st.subheader("2️⃣ Step 2: Upload Master Product Attribute / Catalog File (Optional)")
-attribute_file = st.file_uploader("Drop your Master Item Catalog sheet here", type=["xlsx", "xls", "csv"], key="attribute_sheet")
+attribute_file = st.file_uploader("Drop your Master Item Catalog sheet here to heal remaining missing HSN fields", type=["xlsx", "xls", "csv"], key="attribute_sheet")
 
 if uploaded_file:
     df = load_data_safely(uploaded_file)
@@ -44,20 +45,42 @@ if uploaded_file:
         df.dropna(how='all', inplace=True)
         blank_rows = initial_rows - len(df)
 
-        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Main Sheet)
+        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Main Sheet - Prioritized)
         hsn_col = None
         sku_col = None
         cgst_col = None
         sgst_col = None
         igst_col = None
         
+        # Pass 1: Look for exact structural SKU matching names
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if any(k in c_low for k in ['hsn', 'sac', 'commodity', 'nomenclature', 'hsn/sac', 'hsn_sac', 'hsn_code']):
-                hsn_col = col
-            if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
+            if c_low in ['sku', 'seller-sku', 'item-code', 'article-code', 'wms_code']:
                 sku_col = col
+                break
+        if not sku_col:
+            for col in df.columns:
+                c_low = str(col).strip().lower()
+                if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
+                    sku_col = col
+                    break
 
+        # Pass 1: Look for exact structural HSN matching names
+        for col in df.columns:
+            c_low = str(col).strip().lower()
+            if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn_code', 'commodity']:
+                hsn_col = col
+                break
+        if not hsn_col:
+            for col in df.columns:
+                c_low = str(col).strip().lower()
+                if any(k in c_low for k in ['hsn', 'sac', 'commodity', 'nomenclature', 'hsn/sac', 'hsn_sac', 'hsn_code']):
+                    hsn_col = col
+                    break
+
+        # Target explicit split tax percentage rate markers
+        for col in df.columns:
+            c_low = str(col).strip().lower()
             if any(x in c_low for x in ['gift', 'wrap', 'shipping', 'delivery', 'ship', 'postage', 'tcs', 'amount', 'amt', 'value', 'tax paid', 'tax collected']):
                 continue
             if any(r in c_low for r in ['rate', 'percentage', '%', 'code']):
@@ -73,21 +96,40 @@ if uploaded_file:
 
             # BASE DICTIONARY BUILDING
             master_sku_hsn_map = {}
-            attr_hsn_col = "NOT FOUND"
-            attr_sku_col = "NOT FOUND"
 
             # PART A: Extract HSN mapping data from the external Product Attribute file
             if attribute_file:
                 attr_df = load_data_safely(attribute_file)
                 if attr_df is not None:
+                    attr_hsn_col = None
+                    attr_sku_col = None
+                    
+                    # 🎯 CRITICAL RECTIFICATION: Strict exact match locking for catalog headers
                     for c in attr_df.columns:
                         cl = str(c).strip().lower()
-                        if any(k in cl for k in ['hsn', 'sac', 'commodity', 'nomenclature', 'code']):
-                            attr_hsn_col = c
-                        if any(k in cl for k in ['sku', 'item', 'product', 'article', 'wms', 'id']):
+                        if cl in ['sku', 'seller-sku', 'item-code', 'article-code', 'product-sku']:
                             attr_sku_col = c
+                            break
+                    if not attr_sku_col:
+                        for c in attr_df.columns:
+                            cl = str(c).strip().lower()
+                            if 'sku' in cl and not any(x in cl for x in ['type', 'parent', 'accounting']):
+                                attr_sku_col = c
+                                break
+
+                    for c in attr_df.columns:
+                        cl = str(c).strip().lower()
+                        if cl in ['hsn', 'hsn/sac', 'hsn_code', 'hsncode', 'commoditycode', 'producttaxcode']:
+                            attr_hsn_col = c
+                            break
+                    if not attr_hsn_col:
+                        for c in attr_df.columns:
+                            cl = str(c).strip().lower()
+                            if any(k in cl for k in ['hsn', 'sac', 'taxcode', 'commodity', 'nomenclature']):
+                                attr_hsn_col = c
+                                break
                             
-                    if attr_hsn_col != "NOT FOUND" and attr_sku_col != "NOT FOUND":
+                    if attr_hsn_col and attr_sku_col:
                         for _, row in attr_df.iterrows():
                             r_hsn = str(row[attr_hsn_col]).strip() if pd.notna(row[attr_hsn_col]) else ""
                             r_sku_clean = deep_clean_sku(row[attr_sku_col])
@@ -99,6 +141,7 @@ if uploaded_file:
                             if r_digits and r_digits.lower() not in ["", "nan", "none"] and r_sku_clean:
                                 if len(r_digits) == 7: r_digits = "0" + r_digits
                                 master_sku_hsn_map[r_sku_clean] = r_digits
+                    st.sidebar.success(f"📖 Loaded {len(master_sku_hsn_map)} reference links from Attribute sheet!")
 
             # PART B: Supplement mapping database using internal rows that aren't broken
             if sku_col:
@@ -121,7 +164,6 @@ if uploaded_file:
             pure_numeric_hsns = []
             auto_filled_count = 0
             missing_unresolved = 0
-            sample_failed_skus = [] # Diagnostic list
             
             for index, row in df.iterrows():
                 val = str(row[hsn_col]).strip() if pd.notna(row[hsn_col]) else ""
@@ -135,16 +177,16 @@ if uploaded_file:
                 val_clean = "".join(filter(str.isdigit, val_clean))
                 
                 if not val_clean or val_clean in ["", "nan", "none"]:
+                    # Check Pass 1: Direct structural clean lookup
                     if sku_clean_val in master_sku_hsn_map:
                         val_clean = master_sku_hsn_map[sku_clean_val]
                         auto_filled_count += 1
+                    # Check Pass 2: Fuzzy slice lookup (ignores trailing platform letters like _A or X)
                     elif len(sku_clean_val) > 1 and sku_clean_val[:-1] in master_sku_hsn_map:
                         val_clean = master_sku_hsn_map[sku_clean_val[:-1]]
                         auto_filled_count += 1
                     else:
                         val_clean = "MISSING HSN"
-                        if sku_raw_val not in sample_failed_skus and len(sample_failed_skus) < 10:
-                            sample_failed_skus.append(sku_raw_val)
                 
                 if val_clean != "MISSING HSN":
                     clean_digits = "".join(filter(str.isdigit, val_clean))
@@ -156,7 +198,7 @@ if uploaded_file:
                     
             df['_temp_hsn_pure'] = pure_numeric_hsns
 
-            # PART D: DYNAMIC TAX RECONSTRUCTION
+            # PART D: DYNAMIC "TOTAL TAX RATE" RECONSTRUCTION & PERCENTAGE SCALING
             def extract_rate_number(val):
                 if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']: return 0.0
                 s = str(val).strip().replace('%', '')
@@ -208,7 +250,8 @@ if uploaded_file:
                                     split_str = str(int(new_total_num / 2)) if (new_total_num / 2).is_integer() else str(new_total_num / 2)
                                     df.loc[mismatched_rows, cgst_col] = split_str
                                     df.loc[mismatched_rows, sgst_col] = split_str
-                            except: pass
+                            except: 
+                                pass
 
             # PART F: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNS
             final_shielded_hsns = []
@@ -221,18 +264,13 @@ if uploaded_file:
 
             # 4. RENDER INTERFACE SUCCESS DASHBOARD
             st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
+            st.info(f"🧬 **Universal Alphanumeric Deep Cleaning Connected:** \n* **Fuzzy Repair Status:** Successfully matched and healed **{auto_filled_count} missing HSN rows** by bypassing all spaces, dashes, punctuation marks, and structural encoding mismatches!")
             
-            # 🔴 CRITICAL DIAGNOSTIC PANEL FOR USER REVIEW
-            st.error("🔬 BACKGROUND DIAGNOSTICS CONSOLE")
-            st.write(f"**Main File Targets:** HSN Column: `{hsn_col}` | SKU Column: `{sku_col}`")
-            st.write(f"**Attribute File Targets:** Detected HSN Column: `{attr_hsn_col}` | Detected SKU Column: `{attr_sku_col}`")
-            st.write(f"**Total Mapped References in Dictionary Memory:** {len(master_sku_hsn_map)} SKUs")
-            if sample_failed_skus:
-                st.write("**First 10 Transaction SKUs that failed to match:**")
-                st.code(sample_failed_skus)
+            if tax_corrections_made > 0:
+                st.warning(f"⚖️ TAX AUTO-CORRECTION COMPLETE: Overwrote **{tax_corrections_made} rows** inside your engineered **'Total Tax Rate'** column to resolve double tax rates!")
+            else:
+                st.success("✅ Tax Rate Integrity: Checked all dynamic groups. Every matching item row perfectly aligns.")
 
-            st.info(f"🧬 **Universal Alphanumeric Deep Cleaning Connected:** \n* **Fuzzy Repair Status:** Successfully matched and healed **{auto_filled_count} missing HSN rows**!")
-            
             if missing_unresolved > 0:
                 st.warning(f"⚠️ Notice: {missing_unresolved} rows still could not be resolved. These remain labeled as 'MISSING HSN'.")
 
