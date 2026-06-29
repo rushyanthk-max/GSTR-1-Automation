@@ -32,7 +32,7 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. UNIVERSAL KEYWORD COLUMN SCANNER
+    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict gift wrap exclusion)
     hsn_col = None
     sku_col = None
     cgst_col = None
@@ -50,11 +50,14 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-        # Target explicit individual tax components (and reject absolute values/amounts)
-        if 'amount' not in c_low and 'amt' not in c_low and 'value' not in c_low and 'tcs' not in c_low:
-            if 'cgst' in c_low: cgst_col = col
-            if 'sgst' in c_low: sgst_col = col
-            if 'igst' in c_low: igst_col = col
+        # Target explicit individual tax components 
+        # 🛑 CRITICAL ELIMINATION: Block Gift Wrap, TCS, and financial currency amounts
+        if any(x in c_low for x in ['gift', 'wrap', 'tcs', 'amount', 'amt', 'value']):
+            continue
+
+        if 'cgst' in c_low: cgst_col = col
+        if 'sgst' in c_low: sgst_col = col
+        if 'igst' in c_low: igst_col = col
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
