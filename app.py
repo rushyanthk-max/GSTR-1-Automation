@@ -32,7 +32,7 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Strictly isolating Rate % vs Currency Amount)
+    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict ancillary-tax exclusions)
     hsn_col = None
     sku_col = None
     cgst_col = None
@@ -50,12 +50,11 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-        # Target explicit individual tax components
-        # 🛑 CRITICAL ELIMINATION: Block shipping, gift wrap, TCS, and all currency amounts/values
+        # Target explicit individual tax components 
+        # 🛑 CRITICAL ELIMINATION: Block Shipping, Delivery, Gift Wrap, TCS, and financial currency amounts
         if any(x in c_low for x in ['gift', 'wrap', 'shipping', 'delivery', 'ship', 'postage', 'tcs', 'amount', 'amt', 'value', 'tax paid', 'tax collected']):
             continue
 
-        # 🎯 STRICT REQUIREMENT: Must explicitly track the rate scale percentage 
         if any(r in c_low for r in ['rate', 'percentage', '%', 'code']):
             if 'cgst' in c_low: cgst_col = col
             if 'sgst' in c_low: sgst_col = col
@@ -98,12 +97,19 @@ if uploaded_file:
                 
         df['_temp_hsn_pure'] = pure_numeric_hsns
 
-        # PASS 2: DYNAMIC "TOTAL TAX RATE" RECONSTRUCTION MATHEMATICS
+        # PASS 2: DYNAMIC "TOTAL TAX RATE" RECONSTRUCTION & PERCENTAGE SCALING MATHEMATICS
         def extract_rate_number(val):
             if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']:
                 return 0.0
             s = str(val).strip().replace('%', '')
             s = re.sub(r'\.0+$', '', s)
+            
+            # Auto-correct common platform decimal variations (e.g. 0.018 -> 0.18)
+            if s == '0.018': s = '0.18'
+            if s == '0.005': s = '0.05'
+            if s == '0.012': s = '0.12'
+            if s == '0.028': s = '0.28'
+            
             digits = "".join(c for c in s if c.isdigit() or c == '.')
             try:
                 return float(digits) if digits else 0.0
@@ -115,7 +121,15 @@ if uploaded_file:
         sgst_series = df[sgst_col].apply(extract_rate_number) if sgst_col else pd.Series(0.0, index=df.index)
         igst_series = df[igst_col].apply(extract_rate_number) if igst_col else pd.Series(0.0, index=df.index)
 
-        # Build our mathematically verified Total Combined Tax column string
+        # Smart Scaling: If rows are written as decimal points (<= 1.0), scale them up to whole numbers
+        if cgst_series.max() > 0 and cgst_series.max() <= 1.0:
+            cgst_series = cgst_series * 100
+        if sgst_series.max() > 0 and sgst_series.max() <= 1.0:
+            sgst_series = sgst_series * 100
+        if igst_series.max() > 0 and igst_series.max() <= 1.0:
+            igst_series = igst_series * 100
+
+        # Build our mathematically verified Total Combined Tax column string as clear whole numbers
         calculated_total_rates = []
         for idx in df.index:
             if igst_series[idx] > 0:
@@ -126,8 +140,16 @@ if uploaded_file:
             calculated_total_rates.append(str(int(total_math)) if total_math.is_integer() else str(total_math))
 
         # Inject our newly minted target column into the main dataframe
-        df['Total Tax Rate'] = calculated_total_rates*100
+        df['Total Tax Rate'] = calculated_total_rates
         tax_col = 'Total Tax Rate'
+
+        # Uniformly apply percentage formatting back to original sheet headers 
+        if cgst_col:
+            df[cgst_col] = cgst_series.apply(lambda x: str(int(x)) if x.is_integer() else str(x))
+        if sgst_col:
+            df[sgst_col] = sgst_series.apply(lambda x: str(int(x)) if x.is_integer() else str(x))
+        if igst_col:
+            df[igst_col] = igst_series.apply(lambda x: str(int(x)) if x.is_integer() else str(x))
 
         # PASS 3: PURE MATHEMATICAL MAJORITY VOTE ENFORCER
         tax_corrections_made = 0
@@ -141,7 +163,7 @@ if uploaded_file:
                 valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes != "0") & (valid_taxes != "0.0")]
                 
                 if not valid_taxes.empty:
-                    # Extract the mathematical mode winner (e.g., 18 or 5)
+                    # Extract the mathematical mode winner (e.g. 18 or 5)
                     majority_tax_value = valid_taxes.value_counts().index[0]
                     
                     # Target any rows in this group that contradict the majority vote
@@ -177,7 +199,7 @@ if uploaded_file:
 
         # 5. RENDER INTERFACE SUCCESS DASHBOARD
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
-        st.info(f"🧬 **Dynamic Reconstruction Engine Connected:** \n* **Discovered Rate Columns:** CGST ('{cgst_col if cgst_col else 'Not Found'}'), SGST ('{sgst_col if sgst_col else 'Not Found'}'), IGST ('{igst_col if igst_col else 'Not Found'}') \n* **Generated Verified Target:** 'Total Tax Rate' column successfully calculated from raw rows!")
+        st.info(f"🧬 **Dynamic Reconstruction Engine Connected:** \n* **Normalized Rate Columns:** CGST ('{cgst_col if cgst_col else 'Not Found'}'), SGST ('{sgst_col if sgst_col else 'Not Found'}'), IGST ('{igst_col if igst_col else 'Not Found'}') \n* **Generated Verified Target:** 'Total Tax Rate' column successfully scaled up to percentage whole numbers (5, 18)!")
         
         if tax_corrections_made > 0:
             st.warning(f"⚖️ TAX AUTO-CORRECTION COMPLETE: Detected double tax rates! Overwrote **{tax_corrections_made} rows** inside your newly engineered **'Total Tax Rate'** column (and corresponding sub-components) to perfectly align with majority group rules!")
