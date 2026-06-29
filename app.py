@@ -32,7 +32,7 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict TCS exclusion)
+    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict TCS and Amount exclusion)
     hsn_col = None
     sku_col = None
     tax_col = None
@@ -48,33 +48,27 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-    # STRICT TOTAL TAX COLUMN LOCKOUT (Deliberately skipping any TCS columns)
+    # STRICT PERCENTAGE/RATE TARGETING (Blocks 'amount' and 'tcs' columns completely)
     for col in df.columns:
         c_low = str(col).strip().lower()
-        if 'tcs' in c_low: 
-            continue  # Hard skip on TCS tracking columns
+        
+        # 🛑 CRITICAL EXCLUSIONS: Skip currency amounts and system TCS fractions
+        if 'tcs' in c_low or 'amount' in c_low or 'value' in c_low or 'amt' in c_low: 
+            continue  
             
-        if any(k in c_low for k in ['total tax', 'tax percentage', 'tax rate', 'rate%', 'gst rate', 'tax_rate', 'gst%']):
+        if any(k in c_low for k in ['total tax rate', 'tax percentage', 'tax rate', 'rate%', 'gst rate', 'tax_rate', 'gst%', 'igst rate']):
             tax_col = col
             break
 
-    # Fallback to standard commercial rates if no explicit total header exists
+    # Pass 2: Secondary structural scan if no explicit percentage header was locked down
     if not tax_col:
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if 'tcs' in c_low: 
+            if 'tcs' in c_low or 'amount' in c_low or 'value' in c_low or 'amt' in c_low:
                 continue
-            if 'igst' in c_low and 'rate' in c_low:
+            if 'rate' in c_low or 'percentage' in c_low or '%' in c_low:
                 tax_col = col
                 break
-            elif 'tax' in c_low and 'code' in c_low:
-                tax_col = col
-                break
-
-    # Emergency fallback if all headers are non-standard
-    if not tax_col:
-        tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower() and 'tcs' not in str(c).lower()]
-        if tax_candidates: tax_col = tax_candidates[0]
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
@@ -121,12 +115,12 @@ if uploaded_file:
             for hsn_val, group in df.groupby('_temp_hsn_pure'):
                 if hsn_val != "MISSING HSN" and not group[tax_col].empty:
                     
-                    # Drop completely blank cells or system NaNs in this specific group safely via string operations
+                    # Drop completely blank cells or system NaNs in this specific group safely
                     valid_taxes = group[tax_col].dropna().astype(str).str.strip()
                     valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes.str.lower() != "nan")]
                     
                     if not valid_taxes.empty:
-                        # Extract the mathematical mode winner (the value that shows up most often)
+                        # Extract the mathematical mode winner (the rate value that shows up most often)
                         majority_tax_value = valid_taxes.value_counts().index[0]
                         
                         # Correctly check for variations row-by-row using direct element indexing
@@ -149,10 +143,10 @@ if uploaded_file:
 
         # 5. RENDER INTERFACE SUCCESS DASHBOARD
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
-        st.info(f"🎯 **Target Matrix Connected** \n* **HSN Column:** '{hsn_col}' \n* **Total Tax Column:** '{tax_col if tax_col else 'Not Found'}'")
+        st.info(f"🎯 **Target Matrix Connected** \n* **HSN Column:** '{hsn_col}' \n* **Total Tax Column Locked:** '{tax_col if tax_col else 'Not Found'}'")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} anomalous rows** inside **'{tax_col}'** to align with the dominant majority tax rate for their HSN groups!")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} anomalous rows** inside your true rate column **'{tax_col}'** to align double tax rates via dominant majority rule!")
         elif tax_col:
             st.success(f"✅ Tax Rate Integrity: Checked all rows under total tax column '{tax_col}'. All matching item groups align.")
             
