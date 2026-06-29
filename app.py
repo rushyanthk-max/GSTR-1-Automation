@@ -32,10 +32,12 @@ if uploaded_file:
     df.dropna(how='all', inplace=True)
     blank_rows = initial_rows - len(df)
 
-    # 3. SMART UNIVERSAL KEYWORD COLUMN SCANNER (With strict split-tax exclusions)
+    # 3. UNIVERSAL KEYWORD COLUMN SCANNER
     hsn_col = None
     sku_col = None
-    tax_col = None
+    cgst_col = None
+    sgst_col = None
+    igst_col = None
     
     for col in df.columns:
         c_low = str(col).strip().lower()
@@ -48,36 +50,19 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-    # STRICT TOTAL TAX RATE COLUMN DETECTOR
-    # Pass 1: Prioritize explicit "Total Tax" phrases while strictly skipping split columns
-    for col in df.columns:
-        c_low = str(col).strip().lower()
-        
-        # 🛑 CRITICAL ELIMINATION: Block split taxes (CGST, SGST, UTGST), TCS components, and currency amounts
-        if any(x in c_low for x in ['cgst', 'sgst', 'utgst', 'tcs', 'amount', 'value', 'amt']):
-            continue  
-            
-        if any(k in c_low for k in ['total tax rate', 'tax percentage', 'tax rate', 'rate%', 'gst rate', 'tax_rate', 'gst%', 'igst rate', 'total tax']):
-            tax_col = col
-            break
-
-    # Pass 2: Secondary scan if no explicit total header phrase matched (keeping exclusions active)
-    if not tax_col:
-        for col in df.columns:
-            c_low = str(col).strip().lower()
-            if any(x in c_low for x in ['cgst', 'sgst', 'utgst', 'tcs', 'amount', 'value', 'amt']):
-                continue
-            if 'rate' in c_low or 'percentage' in c_low or '%' in c_low:
-                tax_col = col
-                break
+        # Target explicit individual tax components (and reject absolute values/amounts)
+        if 'amount' not in c_low and 'amt' not in c_low and 'value' not in c_low and 'tcs' not in c_low:
+            if 'cgst' in c_low: cgst_col = col
+            if 'sgst' in c_low: sgst_col = col
+            if 'igst' in c_low: igst_col = col
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
-        # Clear base strings safely
+        # Clear base HSN strings safely
         df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
-        if tax_col:
-            df[tax_col] = df[tax_col].fillna("0").astype(str).str.strip()
-        
+        if sku_col:
+            df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
+
         # PASS 1: Extract temporary pure numeric keys for calculation grouping
         pure_numeric_hsns = []
         for index, row in df.iterrows():
@@ -108,30 +93,77 @@ if uploaded_file:
                 
         df['_temp_hsn_pure'] = pure_numeric_hsns
 
-        # PASS 2: PURE MATHEMATICAL MAJORITY TAX RATE ENFORCER
+        # PASS 2: DYNAMIC "TOTAL TAX RATE" RECONSTRUCTION MATHEMATICS
+        # Mathematical string parser to extract digits cleanly
+        def extract_rate_number(val):
+            if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']:
+                return 0.0
+            s = str(val).strip().replace('%', '')
+            s = re.sub(r'\.0+$', '', s)
+            digits = "".join(c for c in s if c.isdigit() or c == '.')
+            try:
+                return float(digits) if digits else 0.0
+            except:
+                return 0.0
+
+        # Run extraction math on individual sub-component rows
+        cgst_series = df[cgst_col].apply(extract_rate_number) if cgst_col else pd.Series(0.0, index=df.index)
+        sgst_series = df[sgst_col].apply(extract_rate_number) if sgst_col else pd.Series(0.0, index=df.index)
+        igst_series = df[igst_col].apply(extract_rate_number) if igst_col else pd.Series(0.0, index=df.index)
+
+        # Build our mathematically verified Total Combined Tax column string!
+        calculated_total_rates = []
+        for idx in df.index:
+            # If IGST has a value, that is our total tax rate. Otherwise, it is the sum of CGST + SGST
+            if igst_series[idx] > 0:
+                total_math = igst_series[idx]
+            else:
+                total_math = cgst_series[idx] + sgst_series[idx]
+            
+            # Reformat to clean string representation (e.g. 18 instead of 18.0)
+            calculated_total_rates.append(str(int(total_math)) if total_math.is_integer() else str(total_math))
+
+        # Inject our newly minted target column into the main dataframe
+        df['Total Tax Rate'] = calculated_total_rates
+        tax_col = 'Total Tax Rate'
+
+        # PASS 3: PURE MATHEMATICAL MAJORITY VOTE ENFORCER
         tax_corrections_made = 0
         
-        if tax_col:
-            # Group rows by our clean numeric HSN codes
-            for hsn_val, group in df.groupby('_temp_hsn_pure'):
-                if hsn_val != "MISSING HSN" and not group[tax_col].empty:
+        # Group rows by our clean numeric HSN codes
+        for hsn_val, group in df.groupby('_temp_hsn_pure'):
+            if hsn_val != "MISSING HSN" and not group[tax_col].empty:
+                
+                # Isolate rows containing values
+                valid_taxes = group[tax_col].dropna().astype(str).str.strip()
+                valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes != "0")]
+                
+                if not valid_taxes.empty:
+                    # Extract the absolute mathematical winner
+                    majority_tax_value = valid_taxes.value_counts().index[0]
                     
-                    # Drop completely blank cells or system NaNs in this specific group safely
-                    valid_taxes = group[tax_col].dropna().astype(str).str.strip()
-                    valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes.str.lower() != "nan")]
+                    # Target any rows in this group that contradict the majority vote
+                    mismatched_rows = group.index[df.loc[group.index, tax_col].astype(str).str.strip() != majority_tax_value]
                     
-                    if not valid_taxes.empty:
-                        # Extract the mathematical mode winner (the rate value that shows up most often)
-                        majority_tax_value = valid_taxes.value_counts().index[0]
-                        
-                        # Correctly check for variations row-by-row using direct element indexing
-                        mismatched_rows = group.index[df.loc[group.index, tax_col].astype(str).str.strip() != majority_tax_value]
-                        
-                        # Count the corrections and apply the winner to the original tax column
-                        tax_corrections_made += len(mismatched_rows)
-                        df.loc[mismatched_rows, tax_col] = majority_tax_value
+                    # Count corrections and enforce the clean winner onto the calculated row column
+                    tax_corrections_made += len(mismatched_rows)
+                    df.loc[mismatched_rows, tax_col] = majority_tax_value
 
-        # PASS 3: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNS
+                    # SYNC BACK MATH: If split sub-columns exist, balance them out to prevent calculation mismatch errors downstream
+                    if tax_corrections_made > 0:
+                        try:
+                            new_total_num = float(majority_tax_value)
+                            if igst_col:
+                                df.loc[mismatched_rows, igst_col] = majority_tax_value
+                            if cgst_col and sgst_col:
+                                split_value = str(new_total_num / 2)
+                                split_str = str(int(new_total_num / 2)) if (new_total_num / 2).is_integer() else split_value
+                                df.loc[mismatched_rows, cgst_col] = split_str
+                                df.loc[mismatched_rows, sgst_col] = split_str
+                        except:
+                            pass
+
+        # PASS 4: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNS
         final_shielded_hsns = []
         for val in df['_temp_hsn_pure']:
             if val == "MISSING HSN":
@@ -144,12 +176,12 @@ if uploaded_file:
 
         # 5. RENDER INTERFACE SUCCESS DASHBOARD
         st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
-        st.info(f"🎯 **Target Matrix Connected** \n* **HSN Column:** '{hsn_col}' \n* **Total Tax Column Locked:** '{tax_col if tax_col else 'Not Found'}'")
+        st.info(f"🧬 **Dynamic Reconstruction Engine Connected:** \n* **Discovered Split Columns:** CGST ('{cgst_col}'), SGST ('{sgst_col}'), IGST ('{igst_col}') \n* **Generated Verified Target:** 'Total Tax Rate' column successfully calculated from raw row rows!")
         
-        if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} anomalous rows** inside your true rate column **'{tax_col}'** to align double tax rates via dominant majority rule!")
-        elif tax_col:
-            st.success(f"✅ Tax Rate Integrity: Checked all rows under total tax column '{tax_col}'. All matching item groups align.")
+        if tax_corrections_made > 0:
+            st.warning(f"⚖️ TAX AUTO-CORRECTION COMPLETE: Detected double tax rates! Overwrote **{tax_corrections_made} rows** inside your newly engineered **'Total Tax Rate'** column (and corresponding sub-components) to perfectly align with majority group rules!")
+        else:
+            st.success("✅ Tax Rate Integrity: Checked all dynamic groups. Every matching item row perfectly aligns.")
             
     else:
         st.error("❌ Column Detection Error: The script could not automatically identify an HSN column name in your file.")
