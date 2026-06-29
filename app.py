@@ -56,9 +56,9 @@ if uploaded_file:
             if 'sgst' in c_low: sgst_col = scol
             if 'igst' in c_low: igst_col = icol
 
-    print ccol
-    print scol
-    print icol
+        print (ccol)
+        print (scol)
+        print (icol)
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
