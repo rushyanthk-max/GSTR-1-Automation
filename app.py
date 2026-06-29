@@ -48,18 +48,17 @@ if uploaded_file:
         if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
             sku_col = col
 
-    # STRICT TOTAL TAX COLUMN LOCKOUT (Deliberately trashing any TCS markers)
-    # Pass 1: Look for exact absolute total tax parameters
+    # STRICT TOTAL TAX COLUMN LOCKOUT (Deliberately skipping any TCS columns)
     for col in df.columns:
         c_low = str(col).strip().lower()
         if 'tcs' in c_low: 
-            continue  # 🛑 Hard skip on any column tracking TCS rates
+            continue  # Hard skip on TCS tracking columns
             
         if any(k in c_low for k in ['total tax', 'tax percentage', 'tax rate', 'rate%', 'gst rate', 'tax_rate', 'gst%']):
             tax_col = col
             break
 
-    # Pass 2: Fallback to standard commercial rates (IGST/CGST/SGST total tracking markers) if no total header is present
+    # Fallback to standard commercial rates (IGST/CGST/SGST tracking) if no explicit total header exists
     if not tax_col:
         for col in df.columns:
             c_low = str(col).strip().lower()
@@ -72,7 +71,7 @@ if uploaded_file:
                 tax_col = col
                 break
 
-    # Emergency fallback if headings are completely stripped
+    # Emergency fallback if all headers are non-standard
     if not tax_col:
         tax_candidates = [c for c in df.columns if 'rate' in str(c).lower() or 'tax' in str(c).lower() and 'tcs' not in str(c).lower()]
         if tax_candidates: tax_col = tax_candidates[0]
@@ -114,53 +113,30 @@ if uploaded_file:
                 
         df['_temp_hsn_pure'] = pure_numeric_hsns
 
-        # PASS 2: COMMERCIAL TAX RATE HARMONIZATION (Majority Wins Engine)
+        # PASS 2: PURE MATHEMATICAL MAJORITY TAX RATE ENFORCER
         tax_corrections_made = 0
-        hsn_majority_tax_map = {}
-
+        
         if tax_col:
-            def standardize_tax_values(val):
-                t = str(val).strip().upper().replace('%', '')
-                t = re.sub(r'\.0+$', '', t)
-                t = re.sub(r'[\s\-\.\/]', '', t)
-                if '18' in t or 'STANDARD' in t: return "18"
-                if '5' in t or 'REDUCED' in t or 'LOW' in t: return "5"
-                if '12' in t: return "12"
-                if '28' in t: return "28"
-                return t
-
-            df['_temp_tax_match'] = df[tax_col].apply(standardize_tax_values)
-
-            # Map true commercial majority groups
+            # Group rows by our clean numeric HSN codes
             for hsn_val, group in df.groupby('_temp_hsn_pure'):
-                if hsn_val != "MISSING HSN" and not group['_temp_tax_match'].empty:
-                    valid_group = group[group['_temp_tax_match'] != "UNKNOWN"]
-                    if not valid_group.empty:
-                        majority_tax_value = valid_group['_temp_tax_match'].value_counts().index[0]
-                        hsn_majority_tax_map[hsn_val] = majority_tax_value
-
-            # Overwrite minority rate bugs
-            def apply_harmonization(row):
-                global tax_corrections_made
-                hsn_pure = row['_temp_hsn_pure']
-                current_raw = str(row[tax_col]).strip()
-                current_clean = row['_temp_tax_match']
-                
-                if hsn_pure in hsn_majority_tax_map:
-                    correct_majority = hsn_majority_tax_map[hsn_pure]
-                    if current_clean != correct_majority and current_clean != "UNKNOWN":
-                        tax_corrections_made += 1
+                if hsn_val != "MISSING HSN" and not group[tax_col].empty:
+                    
+                    # Drop completely blank cells or system NaNs in this specific group
+                    valid_taxes = group[tax_col].dropna().astype(str).str.strip()
+                    valid_taxes = valid_taxes[(valid_taxes != "") & (valid_taxes.lower() != "nan")]
+                    
+                    if not valid_taxes.empty:
+                        # Extract the mathematical mode winner (the value that shows up most often)
+                        majority_tax_value = valid_taxes.value_counts().index[0]
                         
-                        # Maintain original style layouts (.0 or %)
-                        if '.' in current_raw: return correct_majority + ".0"
-                        if '%' in current_raw: return correct_majority + "%"
-                        return correct_majority
-                return current_raw
+                        # Find any rows in this specific HSN group that are not using the winning majority rate
+                        mismatched_rows = group.index[df.loc[group.index, tax_col].astype(str).str.strip() != majority_tax_value]
+                        
+                        # Count the corrections and apply the winner to the original tax column
+                        tax_corrections_made += len(mismatched_rows)
+                        df.loc[mismatched_rows, tax_col] = majority_tax_value
 
-            df[tax_col] = df.apply(apply_harmonization, axis=1)
-            df.drop(columns=['_temp_tax_match'], inplace=True)
-
-        # PASS 3: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNs
+        # PASS 3: FINALIZE EXCEL FORMULA PROTECTION SHIELD FOR HSNS
         final_shielded_hsns = []
         for val in df['_temp_hsn_pure']:
             if val == "MISSING HSN":
@@ -176,7 +152,7 @@ if uploaded_file:
         st.info(f"🎯 **Target Matrix Connected** \n* **HSN Column:** '{hsn_col}' \n* **Total Tax Column:** '{tax_col if tax_col else 'Not Found'}'")
         
         if tax_col and tax_corrections_made > 0:
-            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} anomalous rows** inside **'{tax_col}'** to resolve double tax rates via dominant majority rule!")
+            st.warning(f"⚖️ TAX AUTO-CORRECTION: Overwrote **{tax_corrections_made} anomalous rows** inside **'{tax_col}'** to align with the dominant majority tax rate for their HSN groups!")
         elif tax_col:
             st.success(f"✅ Tax Rate Integrity: Checked all rows under total tax column '{tax_col}'. All matching item groups align.")
             
