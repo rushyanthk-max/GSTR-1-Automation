@@ -52,9 +52,13 @@ if uploaded_file:
 
         # Target explicit individual tax components (and reject absolute values/amounts)
         if 'amount' not in c_low and 'amt' not in c_low and 'value' not in c_low and 'tcs' not in c_low:
-            if 'cgst' in c_low: cgst_col = col
-            if 'sgst' in c_low: sgst_col = col
-            if 'igst' in c_low: igst_col = col
+            if 'cgst' in c_low: cgst_col = ccol
+            if 'sgst' in c_low: sgst_col = scol
+            if 'igst' in c_low: igst_col = icol
+
+    print ccol
+    print scol
+    print icol
 
     # 4. EXECUTE UNIVERSAL DATA RECONCILIATION
     if hsn_col:
