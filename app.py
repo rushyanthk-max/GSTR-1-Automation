@@ -19,13 +19,13 @@ def load_data_safely(file_obj):
         st.error(f"Error reading file '{file_obj.name}': {str(e)}")
         return None
 
-# Clean individual SKU strings to resolve backticks, spaces, or weird quotes
-def clean_sku_string(sku_val):
+# AGGRESSIVE DEEP CLEAN LAYER: Wipes out hidden zero-width spaces, punctuation, symbols, and backticks
+def deep_clean_sku(sku_val):
     if pd.isna(sku_val):
         return ""
-    s = str(sku_val).strip()
-    # Strip leading/trailing backticks, single quotes, or hidden symbols
-    s = re.sub(r"^[`'\s]+|[`'\s]+$", "", s)
+    s = str(sku_val).strip().lower()
+    # Strip away backticks, single quotes, spaces, dashes, hyphens, and punctuation entirely
+    s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
 # =========================================================================
@@ -92,22 +92,23 @@ if uploaded_file:
                     if attr_hsn_col and attr_sku_col:
                         for _, row in attr_df.iterrows():
                             r_hsn = str(row[attr_hsn_col]).strip() if pd.notna(row[attr_hsn_col]) else ""
-                            r_sku = clean_sku_string(row[attr_sku_col])
+                            # Pass column through aggressive alphanumeric deep cleaner
+                            r_sku_clean = deep_clean_sku(row[attr_sku_col])
                             
                             if r_hsn.startswith('="') and r_hsn.endswith('"'): r_hsn = r_hsn[2:-1]
                             r_clean = re.sub(r'[\s\-\.\/]', '', r_hsn)
                             r_digits = "".join(filter(str.isdigit, r_clean))
                             
-                            if r_digits and r_digits.lower() not in ["", "nan", "none"] and r_sku:
+                            if r_digits and r_digits.lower() not in ["", "nan", "none"] and r_sku_clean:
                                 if len(r_digits) == 7: r_digits = "0" + r_digits
-                                master_sku_hsn_map[r_sku] = r_digits
-                    st.sidebar.success(f"📖 Loaded {len(master_sku_hsn_map)} reference links from Attribute sheet!")
+                                master_sku_hsn_map[r_sku_clean] = r_digits
+                    st.sidebar.success(f"📖 Loaded {len(master_sku_hsn_map)} clean keys from Attribute sheet!")
 
             # PART B: Supplement mapping database using internal rows that aren't broken
             if sku_col:
                 for _, row in df.iterrows():
                     raw_hsn = str(row[hsn_col]).strip() if pd.notna(row[hsn_col]) else ""
-                    raw_sku = clean_sku_string(row[sku_col])
+                    raw_sku_clean = deep_clean_sku(row[sku_col])
                     
                     if raw_hsn.startswith('="') and raw_hsn.endswith('"'): raw_hsn = raw_hsn[2:-1]
                     elif raw_hsn.startswith('='): raw_hsn = raw_hsn.replace('=', '').replace('"', '')
@@ -115,19 +116,20 @@ if uploaded_file:
                     clean_hsn = re.sub(r'[\s\-\.\/]', '', raw_hsn)
                     clean_hsn = "".join(filter(str.isdigit, clean_hsn))
                     
-                    if clean_hsn and clean_hsn not in ["", "nan", "none"] and raw_sku:
+                    if clean_hsn and clean_hsn not in ["", "nan", "none"] and raw_sku_clean:
                         if len(clean_hsn) == 7: clean_hsn = "0" + clean_hsn
-                        if raw_sku not in master_sku_hsn_map:
-                            master_sku_hsn_map[raw_sku] = clean_hsn
+                        if raw_sku_clean not in master_sku_hsn_map:
+                            master_sku_hsn_map[raw_sku_clean] = clean_hsn
 
-            # PART C: AUTO-FILL MISSING HSNS WITH FUZZY SKU MATCHING
+            # PART C: AUTO-FILL MISSING HSNS WITH DEEP FUZZY MATCH TRACKING
             pure_numeric_hsns = []
             auto_filled_count = 0
             missing_unresolved = 0
             
             for index, row in df.iterrows():
                 val = str(row[hsn_col]).strip() if pd.notna(row[hsn_col]) else ""
-                sku_val = clean_sku_string(row[sku_col]) if sku_col else ""
+                sku_raw_val = str(row[sku_col]) if sku_col and pd.notna(row[sku_col]) else ""
+                sku_clean_val = deep_clean_sku(sku_raw_val)
                 
                 if val.startswith('="') and val.endswith('"'): val = val[2:-1]
                 elif val.startswith('='): val = val.replace('=', '').replace('"', '')
@@ -135,12 +137,15 @@ if uploaded_file:
                 val_clean = re.sub(r'[\s\-\.\/]', '', val)
                 val_clean = "".join(filter(str.isdigit, val_clean))
                 
+                # If HSN is missing, look up via our alphanumeric stripped dictionary blocks
                 if not val_clean or val_clean in ["", "nan", "none"]:
-                    if sku_val in master_sku_hsn_map:
-                        val_clean = master_sku_hsn_map[sku_val]
+                    # Look 1: Direct Alphanumeric Clean Match
+                    if sku_clean_val in master_sku_hsn_map:
+                        val_clean = master_sku_hsn_map[sku_clean_val]
                         auto_filled_count += 1
-                    elif len(sku_val) > 1 and sku_val[:-1] in master_sku_hsn_map:
-                        val_clean = master_sku_hsn_map[sku_val[:-1]]
+                    # Look 2: Alphanumeric Clean Match ignoring any single trailing platform letter
+                    elif len(sku_clean_val) > 1 and sku_clean_val[:-1] in master_sku_hsn_map:
+                        val_clean = master_sku_hsn_map[sku_clean_val[:-1]]
                         auto_filled_count += 1
                     else:
                         val_clean = "MISSING HSN"
@@ -221,7 +226,7 @@ if uploaded_file:
 
             # 4. RENDER INTERFACE SUCCESS DASHBOARD
             st.success(f"✨ File parsed successfully! Cleaned up {blank_rows} blank formatting rows.")
-            st.info(f"🧬 **Universal Fuzzy Alignment Connected:** \n* **Fuzzy Repair Status:** Successfully repaired **{auto_filled_count} missing HSN rows** by scrubbing backticks and bypassing trailing platform letter mismatches!")
+            st.info(f"🧬 **Universal Alphanumeric Deep Cleaning Connected:** \n* **Fuzzy Repair Status:** Successfully matched and healed **{auto_filled_count} missing HSN rows** by bypassing all spaces, dashes, punctuation marks, and structural encoding mismatches!")
             
             if tax_corrections_made > 0:
                 st.warning(f"⚖️ TAX AUTO-CORRECTION COMPLETE: Overwrote **{tax_corrections_made} rows** inside your engineered **'Total Tax Rate'** column to resolve double tax rates!")
