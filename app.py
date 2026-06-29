@@ -126,7 +126,7 @@ if uploaded_file:
             calculated_total_rates.append(str(int(total_math)) if total_math.is_integer() else str(total_math))
 
         # Inject our newly minted target column into the main dataframe
-        df['Total Tax Rate'] = calculated_total_rates
+        df['Total Tax Rate'] = calculated_total_rates*100
         tax_col = 'Total Tax Rate'
 
         # PASS 3: PURE MATHEMATICAL MAJORITY VOTE ENFORCER
