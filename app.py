@@ -9,13 +9,22 @@ st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="
 st.title("📦 BCPL Universal E-commerce GST Sanitizer")
 st.write("Upload your files to instantly clean transaction sheets and generate your unified multi-column Error Report.")
 
-# Helper function to read any layout safely into raw text strings
+# Robust helper function to handle dynamic data loads and skip blank spacer rows above headers
 def load_data_safely(file_obj):
     try:
         if file_obj.name.endswith(('.xlsx', '.xls')):
-            return pd.read_excel(file_obj, dtype=str)
+            df = pd.read_excel(file_obj, header=None, dtype=str)
         else:
-            return pd.read_csv(file_obj, dtype=str, low_memory=False)
+            df = pd.read_csv(file_obj, header=None, dtype=str, low_memory=False)
+        
+        # Look for the true header row by dropping completely empty spacer rows at the top
+        first_valid_row_idx = df.dropna(how='all').index[0]
+        df.columns = df.iloc[first_valid_row_idx]
+        df = df.iloc[first_valid_row_idx + 1 :].reset_index(drop=True)
+        
+        # Clean up columns formatting names safely
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
     except Exception as e:
         st.error(f"Error reading file '{file_obj.name}': {str(e)}")
         return None
@@ -46,7 +55,7 @@ if uploaded_file:
         df.dropna(how='all', inplace=True)
         blank_rows = initial_rows - len(df)
 
-        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER
+        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Insulated for Flipkart Layouts)
         hsn_col, sku_col, cgst_col, sgst_col, igst_col, tx_type_col = None, None, None, None, None, None
         
         for col in df.columns:
@@ -57,25 +66,26 @@ if uploaded_file:
         if not sku_col:
             for col in df.columns:
                 c_low = str(col).strip().lower()
-                if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code']):
+                if any(k in c_low for k in ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article', 'wms_code', 'fsn code']):
                     sku_col = col
                     break
 
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn_code', 'commodity']:
+            # Added explicit space parameters ('hsn code', 'hsn sac') to isolate Flipkart columns natively
+            if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commodity', 'hsn sac']:
                 hsn_col = col
                 break
         if not hsn_col:
             for col in df.columns:
                 c_low = str(col).strip().lower()
-                if any(k in c_low for k in ['hsn', 'sac', 'commodity', 'nomenclature', 'hsn/sac', 'hsn_sac', 'hsn_code']):
+                if any(k in c_low for k in ['hsn', 'sac', 'commodity', 'nomenclature', 'hsn/sac', 'hsn code', 'hsn_sac', 'hsn_code', 'hsn sac']):
                     hsn_col = col
                     break
 
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if any(k in c_low for k in ['transaction type', 'type', 'status', 'order status', 'transaction_type']):
+            if any(k in c_low for k in ['transaction type', 'type', 'status', 'order status', 'transaction_type', 'order_status']):
                 tx_type_col = col
                 break
 
@@ -118,13 +128,13 @@ if uploaded_file:
 
                     for c in attr_df.columns:
                         cl = str(c).strip().lower()
-                        if cl in ['hsn', 'hsn/sac', 'hsn_code', 'hsncode', 'commoditycode', 'producttaxcode']:
+                        if cl in ['hsn', 'hsn/sac', 'hsn_code', 'hsncode', 'hsn code', 'commoditycode', 'producttaxcode']:
                             attr_hsn_col = c
                             break
                     if not attr_hsn_col:
                         for c in attr_df.columns:
                             cl = str(c).strip().lower()
-                            if any(k in cl for k in ['hsn', 'sac', 'taxcode', 'commodity', 'nomenclature']):
+                            if any(k in cl for k in ['hsn', 'sac', 'taxcode', 'commodity', 'nomenclature', 'hsn code']):
                                 attr_hsn_col = c
                                 break
 
@@ -163,7 +173,7 @@ if uploaded_file:
                         if raw_sku_clean not in master_sku_hsn_map:
                             master_sku_hsn_map[raw_sku_clean] = clean_hsn
 
-            # PASS A: COMPUTE ORIGINAL COMBINED TAX RATES
+            # PASS A: COMPUTE ORIGINAL TAX RATES
             def extract_rate_number(val):
                 if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']: return 0.0
                 s = str(val).strip().replace('%', '')
@@ -210,7 +220,7 @@ if uploaded_file:
                     pure_numeric_hsns.append("MISSING HSN")
             df['_temp_hsn_pure'] = pure_numeric_hsns
 
-            # PASS C: CAPTURE DUAL TAX RATE BRAKET GROUPS
+            # PASS C: CAPTURE DUAL TAX RATE GROUPS
             double_rate_hsn_list = {}
             hsn_majority_tax_map = {}
             
@@ -224,12 +234,11 @@ if uploaded_file:
                     if not rates_series.empty:
                         unique_rates = rates_series.unique()
                         if len(unique_rates) > 1:
-                            # Save all conflicting rates separated by commas (e.g., "5,18")
                             double_rate_hsn_list[hsn_val] = ",".join(sorted(unique_rates))
                         hsn_majority_tax_map[hsn_val] = rates_series.value_counts().index[0]
 
             # =========================================================================
-            # 🕵️‍♂️ ISOLATE DISCREPANCIES FOR SIDE-BY-SIDE MERGE SUMMARY
+            # 🕵️‍♂️ ISOLATE DISCREPANCIES FOR UNIFIED DASHBOARD SUMMARY
             # =========================================================================
             list_missing_hsn = []
             list_double_rates = []
@@ -273,7 +282,6 @@ if uploaded_file:
                 # Error 5: Wrong HSN Code (by SKU mapping)
                 if clean_sku in master_sku_hsn_map:
                     master_expected_hsn = master_sku_hsn_map[clean_sku]
-                    # Verify original input column vs master
                     orig_hsn_val = "".join(filter(str.isdigit, str(row[hsn_col])))
                     if len(orig_hsn_val) == 7: orig_hsn_val = "0" + orig_hsn_val
                     if orig_hsn_val and orig_hsn_val != master_expected_hsn:
@@ -290,12 +298,11 @@ if uploaded_file:
                             list_wrong_tax_sku.append(entry)
 
             # =========================================================================
-            # 📥 ASSEMBLE UNIFIED SIDE-BY-SIDE SUMMARY SHEETS
+            # 📥 ASSEMBLE UNIFIED DASHBOARD SUMMARY (Side-by-Side Excel View)
             # =========================================================================
             max_len = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_lengths), 
                           len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
 
-            # Build synchronized multi-column frame structure
             audit_data = {
                 "Missing HSN Codes (SKUs)": [list_missing_hsn[i] if i < len(list_missing_hsn) else "" for i in range(max_len)],
                 "Invalid Length HSNs (Not 6 or 8)": [list_invalid_lengths[i] if i < len(list_invalid_lengths) else "" for i in range(max_len)],
@@ -317,7 +324,7 @@ if uploaded_file:
             # Compile into native binary stream packet 
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
-                df_audit_report.to_excel(writer, sheet_name='GSTR1_Audit_Error_Dashboard', index=False)
+                df_audit_report.to_excel(writer, sheet_name='HSN_GST_Audit_Dashboard', index=False)
             excel_buffer.seek(0)
             excel_binary_data = excel_buffer.getvalue()
 
@@ -353,6 +360,7 @@ if uploaded_file:
             # 🎨 RENDER INTERFACE SUCCESS DASHBOARD
             # =========================================================================
             st.success(f"✨ Data Analytics Scan Complete! Processed {initial_rows} lines successfully.")
+            st.info(f"🎯 **Target Matrix Locked Successfully:** \n* **HSN Column Found:** '{hsn_col}' \n* **SKU Column Found:** '{sku_col}'")
             
             st.error("⚠️ COMPLIANCE RISK AUDIT REPORT DISCOVERED!")
             st.download_button(
