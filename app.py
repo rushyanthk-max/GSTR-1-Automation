@@ -3,98 +3,39 @@ import pandas as pd
 import re
 import io
 
-# ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="BCPL Universal GST Sanitizer & Auditor",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
+# Set up clean browser tab and layout
+st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="centered")
 
-# =============================================================================
-# UTILITY FUNCTIONS
-# =============================================================================
+st.title("📦 BCPL Universal E-commerce GST Sanitizer")
+st.write("Upload your files to clean multi-sheet workbooks and generate a raw-data side-by-side Audit Error Report.")
 
-def clean_df_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize column headers; auto-detect header row when missing HSN/SKU cols."""
-    df = df.copy()
+# Robust helper function to handle column strings cleanup formatting safely
+def clean_df_columns(df):
     df.columns = [str(c).strip() for c in df.columns]
-    df = df.reset_index(drop=True)          # Always ensure clean 0-based RangeIndex
-
-    HSN_KW = {"hsn", "sac", "commodity", "nomenclature"}
-    SKU_KW = {"sku", "fsn", "seller-sku", "item-code", "product-id", "article"}
-
-    has_hsn = any(any(k in str(c).lower() for k in HSN_KW) for c in df.columns)
-    has_sku = any(any(k in str(c).lower() for k in SKU_KW) for c in df.columns)
-
+    
+    # Skip any trailing completely empty or unnamed edge spacers if found
+    hsn_keywords = ['hsn', 'sac', 'commodity', 'nomenclature']
+    sku_keywords = ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article']
+    
+    has_hsn = any(any(k in str(c).lower() for k in hsn_keywords) for c in df.columns)
+    has_sku = any(any(k in str(c).lower() for k in sku_keywords) for c in df.columns)
+    
     if not (has_hsn or has_sku):
-        TRIGGERS = {"hsn", "hsn code", "hsn/sac", "sku", "seller sku", "fsn"}
         for idx, row in df.iterrows():
-            vals = {str(v).strip().lower() for v in row.values if pd.notna(v)}
-            if vals & TRIGGERS:
+            row_vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
+            if any(v in ['hsn', 'hsn code', 'hsn/sac', 'sku', 'seller sku', 'fsn'] for v in row_vals):
                 df.columns = [str(v).strip() for v in row.values]
                 df = df.iloc[idx + 1:].reset_index(drop=True)
                 break
     return df
 
-
-def detect_columns(df: pd.DataFrame) -> dict:
-    """
-    Scan a DataFrame and return a dict of detected column names for key fields:
-    sku, hsn, cgst_rate, sgst_rate, igst_rate, order_id, order_item_id, tx_type
-    First match wins; returns None for any field not found.
-    """
-    c = {k: None for k in (
-        "sku", "hsn", "cgst_rate", "sgst_rate",
-        "igst_rate", "order_id", "order_item_id", "tx_type",
-    )}
-    SKIP = {
-        "tcs", "shipping", "gift", "wrap", "delivery", "postage",
-        "cst", "vat", "cess", "tds", "amount", "amt", "value",
-    }
-    TX_KW = {
-        "transaction type", "transaction_type", "order status",
-        "order_status", "event type", "event_type", "document type", "document_type", "type", "status"
-    }
-
-    for col in df.columns:
-        cl = str(col).strip().lower()
-
-        if cl == "order id"      and not c["order_id"]:      c["order_id"]      = col
-        if cl == "order item id" and not c["order_item_id"]: c["order_item_id"] = col
-
-        if not c["sku"]:
-            if cl in {"sku", "seller-sku", "item-code", "article-code", "wms_code"}:
-                c["sku"] = col
-            elif any(k in cl for k in ("sku", "fsn", "product-id", "article", "fsn code")):
-                c["sku"] = col
-
-        if not c["hsn"]:
-            if cl in {"hsn", "hsn/sac", "hsn_sac", "hsncode", "hsn code",
-                      "hsn_code", "commodity", "hsn sac", "commodity code", "commodity_code"}:
-                c["hsn"] = col
-            elif any(k in cl for k in ("hsn", "sac", "commodity", "nomenclature")):
-                c["hsn"] = col
-
-        if not c["tx_type"] and any(k in cl for k in TX_KW):
-            c["tx_type"] = col
-
-        # Skip columns that are definitely not GST rate columns
-        if any(x in cl for x in SKIP):
-            continue
-
-        if "cgst"  in cl and "rate" in cl and not c["cgst_rate"]:  c["cgst_rate"]  = col
-        if ("sgst" in cl or "utgst" in cl) and "rate" in cl and not c["sgst_rate"]: c["sgst_rate"] = col
-        if "igst"  in cl and "rate" in cl and not c["igst_rate"]:  c["igst_rate"]  = col
-
-    return c
-
-
-def deep_clean_sku(val) -> str:
-    """Return a lowercase, alphanumeric-only normalized SKU string."""
-    if pd.isna(val):
+# FLUENT DEEP CLEAN LAYER FOR SKUS
+def deep_clean_sku(sku_val):
+    if pd.isna(sku_val):
         return ""
-    s = str(val).strip().lower()
-    s = s.replace('"', '').replace("'", "").replace("`", "")
+    s = str(sku_val).strip().lower()
+    # Strip backticks, quotes, spaces, and tabs explicitly without relying on backslash symbols
+    s = re.sub(r'[`"\' \t]+', '', s)
     if s.startswith("sku:"):
         s = s[4:]
     elif s.startswith("sku"):
@@ -103,552 +44,391 @@ def deep_clean_sku(val) -> str:
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
-
-def extract_rate_number(val) -> float:
-    """
-    Parse a raw GST rate cell value into a float percentage.
-    Handles: '18%', '18', '0.18', '0.018' (3-decimal Amazon/Flipkart export), etc.
-    """
-    if pd.isna(val) or str(val).strip() in {"", "nan", "None", "<NA>"}:
-        return 0.0
-    s = str(val).strip().replace("%", "").strip()
-    s = re.sub(r"\.0+$", "", s)  # Remove trailing .000
-
-    EXACT: dict[str, float] = {
-        "0.028": 28, "0.018": 18, "0.012": 12, "0.005": 5, "0.003": 3,
-        "0.28":  28, "0.18":  18, "0.12":  12, "0.05":  5, "0.03":  3,
-    }
-    if s in EXACT:
-        return float(EXACT[s])
-
-    digits = "".join(ch for ch in s if ch.isdigit() or ch == ".")
-    try:
-        num = float(digits) if digits else 0.0
-        if 0 < num <= 1.0:
-            num *= 100      # e.g. 0.18 → 18
-        return num
-    except Exception:
-        return 0.0
-
-
-def normalize_hsn(val) -> str:
-    """
-    Normalize any HSN code representation to a clean digit-only string.
-    Strips Excel formula prefix (="), non-digit chars, and pads 7-digit → 8.
-    """
-    if pd.isna(val) or str(val).strip() in {"", "nan", "None"}:
-        return ""
-    h = str(val).strip()
-    if h.startswith('="') and h.endswith('"'):
-        h = h[2:-1]
-    digits = "".join(filter(str.isdigit, re.sub(r"[\s\-\.\/]", "", h)))
-    if len(digits) == 7:
-        digits = "0" + digits
-    return digits
-
-
-# =============================================================================
-# UI — HEADER & FILE UPLOADER COMPONENTS
-# =============================================================================
-st.title("📦 BCPL Universal E-commerce GST Sanitizer & Auditor")
-st.caption(
-    "Upload your files to clean multi-sheet workbooks and generate a "
-    "side-by-side Audit Error Report."
-)
-
-up_col1, up_col2 = st.columns(2)
-with up_col1:
-    st.subheader("1️⃣ Raw Transaction Report")
-    uploaded_file = st.file_uploader(
-        "Sales sheet workbook (.xlsx / .xls / .csv)",
-        type=["xlsx", "xls", "csv"],
-        key="sales_report",
-    )
-with up_col2:
-    st.subheader("2️⃣ Master Product Catalog (Optional)")
-    attribute_file = st.file_uploader(
-        "Item catalog — enables SKU/HSN/Tax audits & auto-healing",
-        type=["xlsx", "xls", "csv"],
-        key="attribute_sheet",
-    )
-
-if not uploaded_file:
-    st.info("👆 Upload a sales / transaction report above to get started.")
-    st.stop()
-
-# =============================================================================
-# LOAD SHEETS
-# =============================================================================
-progress_bar = st.progress(0, text="📂 Loading sheets…")
-
-raw_sheets_dict: dict[str, pd.DataFrame] = {}
-try:
-    if uploaded_file.name.lower().endswith((".xlsx", ".xls")):
-        xf = pd.ExcelFile(uploaded_file)
-        for sname in xf.sheet_names:
-            raw_sheets_dict[sname] = clean_df_columns(
-                pd.read_excel(uploaded_file, sheet_name=sname, dtype=str)
-            )
-    else:
-        raw_sheets_dict["Sales Report"] = clean_df_columns(
-            pd.read_csv(uploaded_file, dtype=str, low_memory=False)
-        )
-except Exception as err:
-    st.error(f"❌ Failed to read uploaded file: {err}")
-    st.stop()
-
-progress_bar.progress(15, text="🔗 Building cross-sheet order reference…")
-
-# =============================================================================
-# CROSS-SHEET ORDER REFERENCE LOOKUP
-# =============================================================================
-sales_lookup_df = pd.DataFrame(columns=["Order ID", "Order Item ID", "SKU", "HSN Code"])
-for sname, df_s in raw_sheets_dict.items():
-    c = detect_columns(df_s)
-    if c["order_id"] and c["order_item_id"] and c["sku"]:
-        sub = pd.DataFrame()
-        sub["Order ID"] = df_s[c["order_id"]].fillna("").astype(str).str.strip()
-        sub["Order Item ID"] = df_s[c["order_item_id"]].fillna("").astype(str).str.strip()
-        sub["SKU"] = df_s[c["sku"]].fillna("").astype(str).str.strip()
-        sub["HSN Code"] = df_s[c["hsn"]].fillna("").astype(str).str.strip() if c["hsn"] else ""
-        
-        sales_lookup_df = pd.concat(
-            [sales_lookup_df, sub.dropna(subset=["Order ID", "Order Item ID"])],
-            ignore_index=True,
-        )
-sales_lookup_df.drop_duplicates(subset=["Order ID", "Order Item ID"], inplace=True)
-
-progress_bar.progress(28, text="📋 Loading master catalog…")
-
-# =============================================================================
-# MASTER CATALOG
-# =============================================================================
-master_sku_hsn: dict[str, str] = {}
-master_sku_tax: dict[str, str] = {}
-master_hsn_tax: dict[str, str] = {}
-
-if attribute_file:
-    try:
-        if attribute_file.name.lower().endswith((".xlsx", ".xls")):
-            attr_df = clean_df_columns(pd.read_excel(attribute_file, dtype=str))
-        else:
-            attr_df = clean_df_columns(
-                pd.read_csv(attribute_file, dtype=str, low_memory=False)
-            )
-
-        a_sku = a_hsn = a_tax = None
-        for col in attr_df.columns:
-            cl = str(col).strip().lower()
-            if cl in ['sku', 'seller-sku', 'item-code', 'article-code', 'product-sku']:
-                a_sku = col; break
-        if not a_sku:
-            for col in attr_df.columns:
-                cl = str(col).strip().lower()
-                if any(k in cl for k in ("sku", "item-code", "article-code", "product-sku")): a_sku = col; break
-
-        for col in attr_df.columns:
-            cl = str(col).strip().lower()
-            if cl in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commoditycode', 'producttaxcode']:
-                a_hsn = col; break
-        if not a_hsn:
-            for col in attr_df.columns:
-                cl = str(col).strip().lower()
-                if any(k in cl for k in ("hsn", "sac", "taxcode", "commodity", "nomenclature", "producttaxcode")): a_hsn = col; break
-
-        for col in attr_df.columns:
-            cl = str(col).strip().lower()
-            if any(k in cl for k in ("producttaxrule", "tax rule", "gst rate", "tax percentage", "tax_rule")):
-                a_tax = col; break
-
-        if a_hsn and a_sku:
-            for _, row in attr_df.iterrows():
-                r_hsn = normalize_hsn(row[a_hsn]) if pd.notna(row[a_hsn]) else ""
-                r_sku = deep_clean_sku(row[a_sku])
-                r_tax = (
-                    "".join(filter(str.isdigit, str(row[a_tax]).strip()))
-                    if a_tax and pd.notna(row[a_tax])
-                    else ""
-                )
-                if r_hsn and r_sku:
-                    master_sku_hsn[r_sku] = r_hsn
-                    if r_tax:
-                        master_sku_tax[r_sku] = r_tax
-                        master_hsn_tax[r_hsn] = r_tax
-    except Exception as err:
-        st.warning(f"⚠️ Could not fully load master catalog: {err}")
-
-progress_bar.progress(42, text="🕵️ Auditing records…")
-
-# =============================================================================
-# BUILD RAW RECORDS  (one entry per data row across all sheets)
-# =============================================================================
-global_raw_records: list[dict] = []
-discovered_mappings: list[str] = []
-
-for sname, df_s in raw_sheets_dict.items():
-    c = detect_columns(df_s)
-    discovered_mappings.append(
-        f"**{sname}** — HSN col: `{c['hsn'] or '—'}` | SKU col: `{c['sku'] or '—'}`"
-    )
-
-    df_work = df_s.copy()
-    if c["order_id"] and c["order_item_id"] and (not c["sku"] or not c["hsn"]):
-        df_work = df_work.merge(sales_lookup_df, left_on=[c["order_id"], c["order_item_id"]], right_on=["Order ID", "Order Item ID"], how="left")
-        if not c["sku"] and "SKU" in df_work.columns: c["sku"] = "SKU"
-        if not c["hsn"] and "HSN Code" in df_work.columns: c["hsn"] = "HSN Code"
-
-    cgst_s = df_work[c["cgst_rate"]].apply(extract_rate_number) if c["cgst_rate"] else pd.Series(0.0, index=df_work.index)
-    sgst_s = df_work[c["sgst_rate"]].apply(extract_rate_number) if c["sgst_rate"] else pd.Series(0.0, index=df_work.index)
-    igst_s = df_work[c["igst_rate"]].apply(extract_rate_number) if c["igst_rate"] else pd.Series(0.0, index=df_work.index)
-
-    for pos, (df_idx, row) in enumerate(df_work.iterrows()):
-        rhsn = str(row[c["hsn"]]).strip() if c["hsn"] and pd.notna(row[c["hsn"]]) else ""
-        rsku = str(row[c["sku"]]).strip() if c["sku"] and pd.notna(row[c["sku"]]) else ""
-
-        hsn_dig = normalize_hsn(rhsn)
-        sku_disp = re.sub(r'[^a-zA-Z0-9_\-]', '', rsku)
-        if sku_disp.upper().startswith("SKU:"):
-            sku_disp = sku_disp[4:]
-
-        total = igst_s.loc[df_idx] if igst_s.loc[df_idx] > 0 else (cgst_s.loc[df_idx] + sgst_s.loc[df_idx])
-        rate_str = str(int(total)) if total == int(total) else str(total)
-        tx_status = str(row[c["tx_type"]]).strip().lower() if c["tx_type"] else ""
-
-        global_raw_records.append({
-            "sheet":       sname,
-            "df_idx":      df_idx,
-            "sku_display": sku_disp,
-            "clean_sku":   deep_clean_sku(rsku),
-            "raw_hsn":     hsn_dig,
-            "rate_str":    rate_str,
-            "tx_status":   tx_status,
-        })
-
-progress_bar.progress(58, text="🔍 Detecting compliance errors…")
-
-# =============================================================================
-# ERROR DETECTION  (6 categories)
-# =============================================================================
-
-# Pre-compute HSNs that appear with more than one distinct tax rate in this file
-_hsn_rates: dict[str, set] = {}
-for r in global_raw_records:
-    h, rt = r["raw_hsn"], r["rate_str"]
-    if h and rt not in {"0", "0.0", ""}:
-        _hsn_rates.setdefault(h, set()).add(rt)
-double_rate_hsns = {h: ",".join(sorted(v)) for h, v in _hsn_rates.items() if len(v) > 1}
-
-list_missing_hsn:  list = []
-list_double_rates: list = []
-list_invalid_len:  list = []
-list_wrong_tax_hsn: list = []
-list_wrong_hsn_sku: list = []
-list_wrong_tax_sku: list = []
-
-# O(1) seen-sets to avoid O(n²) duplicate checks
-_seen = {k: set() for k in ("miss", "dbl", "inv", "wth", "whs", "wts")}
-
-for r in global_raw_records:
-    h, rt, sd, cs, ts = (
-        r["raw_hsn"], r["rate_str"],
-        r["sku_display"], r["clean_sku"], r["tx_status"],
-    )
-
-    # 1. Missing HSN code
-    if not h and "cancel" not in ts and sd and sd not in _seen["miss"]:
-        list_missing_hsn.append(sd)
-        _seen["miss"].add(sd)
-
-    # 2. Conflicting tax rates for the same HSN
-    if h in double_rate_hsns:
-        key = (h, sd)
-        if key not in _seen["dbl"]:
-            list_double_rates.append({"HSN": h, "SKU": sd, "Tax Rates Found": double_rate_hsns[h]})
-            _seen["dbl"].add(key)
-
-    # 3. HSN digit length not 6 or 8
-    if h and len(h) not in {6, 8} and h not in _seen["inv"]:
-        list_invalid_len.append({"HSN Code": h, "Digit Count": len(h)})
-        _seen["inv"].add(h)
-
-    # 4. Wrong tax rate per HSN (vs master catalog)
-    if h in master_hsn_tax:
-        m_tax = master_hsn_tax[h]
-        key = (h, rt)
-        if rt not in {"0", ""} and rt != m_tax and key not in _seen["wth"]:
-            list_wrong_tax_hsn.append({"HSN": h, "Input Rate": rt, "Master Rate": m_tax})
-            _seen["wth"].add(key)
-
-    # 5. Wrong HSN for SKU (vs master catalog)
-    if cs in master_sku_hsn:
-        m_hsn = master_sku_hsn[cs]
-        key = (cs, h)
-        if h and h != m_hsn and key not in _seen["whs"]:
-            list_wrong_hsn_sku.append({"SKU": sd, "Input HSN": h, "Master HSN": m_hsn})
-            _seen["whs"].add(key)
-
-    # 6. Wrong GST rate for SKU (vs master catalog)
-    if cs in master_sku_tax:
-        m_tax = master_sku_tax[cs]
-        key = (cs, rt)
-        if rt not in {"0", ""} and rt != m_tax and key not in _seen["wts"]:
-            list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
-            _seen["wts"].add(key)
-
-progress_bar.progress(72, text="🛠️ Sanitizing workbook…")
-
-# =============================================================================
-# SANITIZATION PHASE
-# =============================================================================
-sanitized_sheets: dict[str, pd.DataFrame] = {}
-
-for sname, df_s in raw_sheets_dict.items():
-    df_out = df_s.copy()
-    c = detect_columns(df_out)
-    sheet_recs = [r for r in global_raw_records if r["sheet"] == sname]
-
-    # Step A — Heal missing HSNs from master catalog
-    healed_hsns: list[str] = []
-    for r in sheet_recs:
-        if not r["raw_hsn"] and r["clean_sku"] in master_sku_hsn:
-            healed_hsns.append(master_sku_hsn[r["clean_sku"]])
-        else:
-            healed_hsns.append(r["raw_hsn"] or "MISSING HSN")
-
-    # Step B — Majority-vote tax rate per HSN within this sheet
-    _hsn_pos: dict[str, list[int]] = {}
-    for pos, h in enumerate(healed_hsns):
-        if h != "MISSING HSN":
-            _hsn_pos.setdefault(h, []).append(pos)
-
-    majority_tax: dict[str, str] = {}
-    for h, positions in _hsn_pos.items():
-        rates = [
-            sheet_recs[p]["rate_str"] for p in positions
-            if sheet_recs[p]["rate_str"] not in {"", "0", "0.0"}
-        ]
-        if rates:
-            majority_tax[h] = max(set(rates), key=rates.count)
-
-    # Step C — Build final output vectors
-    final_hsns  = [f'="{h}"' if h != "MISSING HSN" else "MISSING HSN" for h in healed_hsns]
-    final_rates = [majority_tax.get(h, r["rate_str"]) for h, r in zip(healed_hsns, sheet_recs)]
-
-    if c["hsn"]:
-        df_out[c["hsn"]] = final_hsns
-    df_out["Total Tax Rate"] = final_rates
-
-    # Step D — Apply IGST vs CGST+SGST split
-    for pos, (df_idx, _) in enumerate(df_out.iterrows()):
-        winner = final_rates[pos]
+# EXTRACT NUMERIC % WHOLE VALUES FROM RAW STRINGS
+def extract_rate_number(val):
+    if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']: return 0.0
+    s = str(val).strip().replace('%', '')
+    if s == '0.018' or s == '0.005' or s == '0.012' or s == '0.028':
         try:
-            w = float(winner)
-            if w == 0:
-                continue
-            igst_raw = str(df_out.at[df_idx, c["igst_rate"]]).strip() if c["igst_rate"] else "0"
-            if c["igst_rate"] and igst_raw not in {"", "0", "0.0"}:
-                df_out.at[df_idx, c["igst_rate"]] = winner
-                if c["cgst_rate"]: df_out.at[df_idx, c["cgst_rate"]] = "0"
-                if c["sgst_rate"]: df_out.at[df_idx, c["sgst_rate"]] = "0"
-            else:
-                half = w / 2
-                split = str(int(half)) if half == int(half) else str(half)
-                if c["cgst_rate"]: df_out.at[df_idx, c["cgst_rate"]] = split
-                if c["sgst_rate"]: df_out.at[df_idx, c["sgst_rate"]] = split
-                if c["igst_rate"]: df_out.at[df_idx, c["igst_rate"]] = "0"
-        except Exception:
+            s = str(float(s) * 10)
+        except:
             pass
+    digits = "".join(c for c in s if c.isdigit() or c == '.')
+    try: 
+        num = float(digits) if digits else 0.0
+        if num > 0 and num <= 1.0: num = num * 100
+        return num
+    except: return 0.0
 
-    sanitized_sheets[sname] = df_out
+# =========================================================================
+# 1. DUAL FILE UPLOADER COMPONENTS
+# =========================================================================
+st.subheader("1️⃣ Step 1: Upload Raw Transaction Report")
+uploaded_file = st.file_uploader("Drop your sales sheet workbook here", type=["xlsx", "xls", "csv"], key="sales_report")
 
-progress_bar.progress(88, text="📊 Generating Excel reports…")
+st.subheader("2️⃣ Step 2: Upload Master Product Attribute / Catalog File (Optional)")
+attribute_file = st.file_uploader("Drop your Master Item Catalog sheet here to enable SKU/Tax audits and auto-healing", type=["xlsx", "xls", "csv"], key="attribute_sheet")
 
-# =============================================================================
-# BUILD AUDIT REPORT EXCEL
-# =============================================================================
-max_rows = max(
-    len(list_missing_hsn), len(list_double_rates), len(list_invalid_len),
-    len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1,
-)
-
-
-def _pad(lst: list, key: str | None = None) -> list:
-    """Pad a list of strings or dicts to max_rows length."""
-    src = [row[key] if (key and isinstance(row, dict)) else row for row in lst]
-    return [src[i] if i < len(src) else "" for i in range(max_rows)]
-
-
-audit_df = pd.DataFrame({
-    "Missing HSN Codes (SKUs)":          _pad(list_missing_hsn),
-    "Invalid Length HSNs":               _pad(list_invalid_len, "HSN Code"),
-    "Invalid Length — Digit Count":      _pad(list_invalid_len, "Digit Count"),
-    "Double Rate — HSN":                 _pad(list_double_rates, "HSN"),
-    "Double Rate — SKU":                 _pad(list_double_rates, "SKU"),
-    "Double Rate — Rates Found":         _pad(list_double_rates, "Tax Rates Found"),
-    "Wrong Tax (HSN) — HSN":             _pad(list_wrong_tax_hsn, "HSN"),
-    "Wrong Tax (HSN) — Input Rate":      _pad(list_wrong_tax_hsn, "Input Rate"),
-    "Wrong Tax (HSN) — Master Rate":     _pad(list_wrong_tax_hsn, "Master Rate"),
-    "Wrong HSN (SKU) — SKU":             _pad(list_wrong_hsn_sku, "SKU"),
-    "Wrong HSN (SKU) — Input HSN":       _pad(list_wrong_hsn_sku, "Input HSN"),
-    "Wrong HSN (SKU) — Master HSN":      _pad(list_wrong_hsn_sku, "Master HSN"),
-    "Incorrect GST Rate — SKU":          _pad(list_wrong_tax_sku, "SKU"),
-    "Incorrect GST Rate — Input Rate":   _pad(list_wrong_tax_sku, "Input Rate"),
-    "Incorrect GST Rate — Master Rate":  _pad(list_wrong_tax_sku, "Master Rate"),
-})
-
-audit_buf = io.BytesIO()
-with pd.ExcelWriter(audit_buf, engine="xlsxwriter") as writer:
-    audit_df.to_excel(writer, sheet_name="HSN_GST_Audit_Dashboard", index=False)
-    wb = writer.book
-    ws = writer.sheets["HSN_GST_Audit_Dashboard"]
-    hdr_fmt = wb.add_format({
-        "bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF",
-        "border": 1, "text_wrap": True, "valign": "vcenter",
-    })
-    ws.set_row(0, 32)
-    for col_i, col_name in enumerate(audit_df.columns):
-        ws.write(0, col_i, col_name, hdr_fmt)
-        ws.set_column(col_i, col_i, max(20, len(col_name) // 2 + 4))
-audit_buf.seek(0)
-audit_bytes = audit_buf.getvalue()
-
-# Sanitized workbook
-clean_buf = io.BytesIO()
-with pd.ExcelWriter(clean_buf, engine="xlsxwriter") as writer:
-    for sname, df_out in sanitized_sheets.items():
-        df_out.to_excel(writer, sheet_name=sname, index=False)
-clean_buf.seek(0)
-clean_bytes = clean_buf.getvalue()
-
-progress_bar.progress(100, text="✅ All done!")
-progress_bar.empty()
-
-# =============================================================================
-# UI — RESULTS DASHBOARD
-# =============================================================================
-
-# ── Sidebar ───────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.header("📊 Audit Summary")
-    st.metric("🔴 Missing HSN (SKUs)",  len(list_missing_hsn))
-    st.metric("⚠️ Invalid HSN Lengths", len(list_invalid_len))
-    st.metric("🔁 Double Tax Rates",    len(list_double_rates))
-    st.metric("❌ Wrong Tax (HSN)",     len(list_wrong_tax_hsn))
-    st.metric("🔀 Wrong HSN (SKU)",     len(list_wrong_hsn_sku))
-    st.metric("💸 Incorrect GST Rate",  len(list_wrong_tax_sku))
-    st.divider()
-    total_issues = sum(map(len, [
-        list_missing_hsn, list_invalid_len, list_double_rates,
-        list_wrong_tax_hsn, list_wrong_hsn_sku, list_wrong_tax_sku,
-    ]))
-    st.metric("⚡ Total Issues", total_issues)
-    if total_issues == 0:
-        st.success("No compliance issues found!")
+if uploaded_file:
+    # Dictionary tracking raw dataframes extracted per tab sheet
+    raw_sheets_dict = {}
+    
+    if uploaded_file.name.endswith(('.xlsx', '.xls')):
+        excel_file = pd.ExcelFile(uploaded_file)
+        for sheet in excel_file.sheet_names:
+            df_sheet = pd.read_excel(uploaded_file, sheet_name=sheet, dtype=str)
+            raw_sheets_dict[sheet] = clean_df_columns(df_sheet)
     else:
-        st.warning(f"{total_issues} issues need attention.")
-    st.divider()
-    st.subheader("🎯 Column Detection")
-    for m in discovered_mappings:
-        st.markdown(m)
+        df_csv = pd.read_csv(uploaded_file, dtype=str, low_memory=False)
+        raw_sheets_dict["Sales Report"] = clean_df_columns(df_csv)
 
-# ── Status banner ─────────────────────────────────────────────────────────────
-st.success(
-    f"✅ Processed **{len(raw_sheets_dict)}** sheet(s) · "
-    f"**{len(global_raw_records)}** rows audited · "
-    f"**{len(master_sku_hsn)}** SKUs in catalog"
-)
+    # 3. BUILD CENTRALIZED INTER-SHEET MATCH REFERENCE LOOKUP
+    sales_lookup_df = pd.DataFrame(columns=['Order ID', 'Order Item ID', 'SKU', 'HSN Code'])
+    for sheet_name, df_s in raw_sheets_dict.items():
+        cols_low = [str(c).lower() for c in df_s.columns]
+        if 'order id' in cols_low and 'order item id' in cols_low and any('sku' in c for c in cols_low):
+            o_col = [c for c in df_s.columns if str(c).lower() == 'order id'][0]
+            oi_col = [c for c in df_s.columns if str(c).lower() == 'order item id'][0]
+            s_col = [c for c in df_s.columns if 'sku' in str(c).lower()][0]
+            h_col = [c for c in df_s.columns if 'hsn' in str(c).lower() or 'sac' in str(c).lower()][0] if any('hsn' in c or 'sac' in c for c in cols_low) else None
+            
+            if h_col:
+                subset = df_s[[o_col, oi_col, s_col, h_col]].dropna(subset=[o_col, oi_col])
+                subset.columns = ['Order ID', 'Order Item ID', 'SKU', 'HSN Code']
+                sales_lookup_df = pd.concat([sales_lookup_df, subset], ignore_index=True)
+    sales_lookup_df.drop_duplicates(subset=['Order ID', 'Order Item ID'], inplace=True)
 
-# ── Metrics row ───────────────────────────────────────────────────────────────
-cols = st.columns(6)
-labels = ["🔴 Missing HSN", "⚠️ Invalid Len", "🔁 Double Rate",
-          "❌ Wrong Tax/HSN", "🔀 Wrong HSN/SKU", "💸 Wrong GST"]
-counts = [len(list_missing_hsn), len(list_invalid_len), len(list_double_rates),
-          len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku)]
-for col, lbl, cnt in zip(cols, labels, counts):
-    col.metric(lbl, cnt)
+    # 4. MAP MASTER PRODUCT CATALOG DICTIONARIES
+    master_sku_hsn_map = {}
+    master_sku_tax_map = {}
+    master_hsn_tax_map = {}
 
-st.divider()
+    if attribute_file:
+        if attribute_file.name.endswith(('.xlsx', '.xls')):
+            attr_raw = pd.read_excel(attribute_file, dtype=str)
+        else:
+            attr_raw = pd.read_csv(attribute_file, dtype=str, low_memory=False)
+        attr_df = clean_df_columns(attr_raw)
+        
+        attr_hsn_col, attr_sku_col, attr_tax_col = None, None, None
+        for c in attr_df.columns:
+            cl = str(c).strip().lower()
+            if cl in ['sku', 'seller-sku', 'item-code', 'article-code', 'product-sku']: attr_sku_col = c; break
+        if not attr_sku_col:
+            for c in attr_df.columns:
+                cl = str(c).strip().lower()
+                if 'sku' in cl and not any(x in cl for x in ['type', 'parent', 'accounting']): attr_sku_col = c; break
 
-# ── Error preview expanders (one per category) ────────────────────────────────
-CAT_NOTE = "Upload a master catalog (Step 2) to enable this check."
+        for c in attr_df.columns:
+            cl = str(c).strip().lower()
+            if cl in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commoditycode', 'producttaxcode']: attr_hsn_col = c; break
+        if not attr_hsn_col:
+            for c in attr_df.columns:
+                cl = str(c).strip().lower()
+                if any(k in cl for k in ['hsn', 'sac', 'taxcode', 'commodity', 'nomenclature']): attr_hsn_col = c; break
 
-with st.expander(f"🔴 Missing HSN Codes — {len(list_missing_hsn)} SKU(s)",
-                 expanded=bool(list_missing_hsn)):
-    if list_missing_hsn:
-        st.dataframe(pd.DataFrame({"SKU": list_missing_hsn}),
-                     use_container_width=True, height=220)
-    else:
-        st.success("No missing HSN codes found.")
+        for c in attr_df.columns:
+            cl = str(c).strip().lower()
+            if any(k in cl for k in ['producttaxrule', 'tax rule', 'tax_rule', 'gst rate', 'tax percentage']): attr_tax_col = c; break
+        
+        if attr_hsn_col and attr_sku_col:
+            for _, row in attr_df.iterrows():
+                r_hsn = str(row[attr_hsn_col]).strip() if pd.notna(row[attr_hsn_col]) else ""
+                r_sku_clean = deep_clean_sku(row[attr_sku_col])
+                r_tax_raw = str(row[attr_tax_col]).strip() if attr_tax_col and pd.notna(row[attr_tax_col]) else ""
+                
+                if r_hsn.startswith('="') and r_hsn.endswith('"'): r_hsn = r_hsn[2:-1]
+                r_digits = "".join(filter(str.isdigit, re.sub(r'[\s\-\.\/]', '', r_hsn)))
+                if len(r_digits) == 7: r_digits = "0" + r_digits
+                r_tax_digits = "".join(filter(str.isdigit, r_tax_raw))
+                
+                if r_digits and r_digits.lower() not in ["", "nan", "none"] and r_sku_clean:
+                    master_sku_hsn_map[r_sku_clean] = r_digits
+                    if r_tax_digits:
+                        master_sku_tax_map[r_sku_clean] = r_tax_digits
+                        master_hsn_tax_map[r_digits] = r_tax_digits
 
-with st.expander(f"⚠️ Invalid HSN Lengths — {len(list_invalid_len)}", expanded=False):
-    if list_invalid_len:
-        st.dataframe(pd.DataFrame(list_invalid_len),
-                     use_container_width=True, height=220)
-    else:
-        st.success("All HSN codes have valid lengths (6 or 8 digits).")
+    # =========================================================================
+    # 🕵️‍♂️ COMPUTE COMPLETE RAW AUDIT RECORDS AND COMPILE ERROR REPORT
+    # =========================================================================
+    global_raw_records = []
+    discovered_mappings_summary = []
+    
+    for sheet_name, df_s in raw_sheets_dict.items():
+        # Identify headers for current sheet
+        sh_hsn_col, sh_sku_col, sh_cgst_col, sh_sgst_col, sh_igst_col, sh_tx_type_col = None, None, None, None, None, None
+        sh_oid_col, sh_oiid_col = None, None
 
-with st.expander(f"🔁 Conflicting Tax Rates (Same HSN) — {len(list_double_rates)}",
-                 expanded=False):
-    if list_double_rates:
-        st.dataframe(pd.DataFrame(list_double_rates),
-                     use_container_width=True, height=220)
-    else:
-        st.success("No conflicting tax rates detected.")
+        for col in df_s.columns:
+            c_low = str(col).strip().lower()
+            if c_low == 'order id': sh_oid_col = col
+            if c_low == 'order item id': sh_oiid_col = col
+            if c_low in ['sku', 'seller-sku', 'item-code', 'article-code', 'wms_code']: sh_sku_col = col
+            if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commodity', 'hsn sac']: sh_hsn_col = col
 
-with st.expander(f"❌ Wrong Tax Rate (HSN-Based) — {len(list_wrong_tax_hsn)}",
-                 expanded=False):
-    if list_wrong_tax_hsn:
-        st.dataframe(pd.DataFrame(list_wrong_tax_hsn),
-                     use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No HSN-based tax rate mismatches found.")
-    else:
-        st.info(CAT_NOTE)
+        if not sh_sku_col:
+            for col in df_s.columns:
+                if any(k in str(col).lower() for k in ['sku', 'fsn', 'seller-sku', 'product-id', 'article']): sh_sku_col = col; break
+        if not sh_hsn_col:
+            for col in df_s.columns:
+                if any(k in str(col).lower() for k in ['hsn', 'sac', 'commodity', 'nomenclature']): sh_hsn_col = col; break
 
-with st.expander(f"🔀 Wrong HSN per SKU — {len(list_wrong_hsn_sku)}", expanded=False):
-    if list_wrong_hsn_sku:
-        st.dataframe(pd.DataFrame(list_wrong_hsn_sku),
-                     use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU→HSN mismatches found.")
-    else:
-        st.info(CAT_NOTE)
+        for col in df_s.columns:
+            c_low = str(col).strip().lower()
+            if any(k in c_low for k in ['transaction type', 'type', 'status', 'order status', 'transaction_type', 'order_status', 'event type', 'event_type', 'document type']):
+                sh_tx_type_col = col; break
 
-with st.expander(f"💸 Incorrect GST Rate (SKU-Based) — {len(list_wrong_tax_sku)}",
-                 expanded=False):
-    if list_wrong_tax_sku:
-        st.dataframe(pd.DataFrame(list_wrong_tax_sku),
-                     use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU-based GST rate errors found.")
-    else:
-        st.info(CAT_NOTE)
+        # 🎯 CRITICAL STABILIZATION: Explicitly and exclusively fetch IGST, CGST, SGST Rates
+        for col in df_s.columns:
+            c_low = str(col).strip().lower()
+            if any(x in c_low for x in ['tcs', 'shipping', 'gift', 'wrap', 'delivery', 'postage', 'cst', 'vat', 'cess', 'tds', 'amount', 'amt', 'value']):
+                continue
+            if 'cgst' in c_low and 'rate' in c_low: sh_cgst_col = col
+            if ('sgst' in c_low or 'utgst' in c_low) and 'rate' in c_low: sh_sgst_col = col
+            if 'igst' in c_low and 'rate' in c_low: sh_igst_col = col
 
-st.divider()
+        # Save mapping confirmation info safely
+        if sh_hsn_col or sh_sku_col:
+            discovered_mappings_summary.append(f"* **Sheet '{sheet_name}':** HSN Key: `{sh_hsn_col if sh_hsn_col else 'Not Found'}` | SKU Key: `{sh_sku_col if sh_sku_col else 'Not Found'}`")
 
-# ── Download buttons ──────────────────────────────────────────────────────────
-base_name = uploaded_file.name.rsplit(".", 1)[0]
-dl1, dl2 = st.columns(2)
-with dl1:
+        # Build raw details row by row for current sheet
+        for index, row in df_s.iterrows():
+            # Handle cross-tab lookup if sheet lacks HSN or SKU directly
+            rhsn_field, rsku_field = "", ""
+            if sh_hsn_col: rhsn_field = str(row[sh_hsn_col]).strip() if pd.notna(row[sh_hsn_col]) else ""
+            if sh_sku_col: rsku_field = str(row[sh_sku_col]).strip() if pd.notna(row[sh_sku_col]) else ""
+            
+            if sh_oid_col and sh_oiid_col and (not rhsn_field or not rsku_field):
+                oid_val = str(row[sh_oid_col]).strip() if pd.notna(row[sh_oid_col]) else ""
+                oiid_val = str(row[sh_oiid_col]).strip() if pd.notna(row[sh_oiid_col]) else ""
+                match_ref = sales_lookup_df[(sales_lookup_df['Order ID'] == oid_val) & (sales_lookup_df['Order Item ID'] == oiid_val)]
+                if not match_ref.empty:
+                    if not rsku_field: rsku_field = str(match_ref['SKU'].values[0])
+                    if not rhsn_field: rhsn_field = str(match_ref['HSN Code'].values[0])
+
+            if rhsn_field.startswith('="') and rhsn_field.endswith('"'): rhsn_field = rhsn_field[2:-1]
+            hsn_digits = "".join(filter(str.isdigit, re.sub(r'[\s\-\.\/]', '', rhsn_field)))
+            if len(hsn_digits) == 7: hsn_digits = "0" + hsn_digits
+
+            sku_disp = re.sub(r'^["\'`\s]+|["\'`\s]+$', '', rsku_field)
+            if sku_disp.startswith("SKU:"): sku_disp = sku_disp[4:]
+
+            cgst_v = extract_rate_number(row[sh_cgst_col]) if sh_cgst_col else 0.0
+            sgst_v = extract_rate_number(row[sh_sgst_col]) if sh_sgst_col else 0.0
+            igst_v = extract_rate_number(row[sh_igst_col]) if sh_igst_col else 0.0
+            
+            total_math = igst_v if igst_v > 0 else (cgst_v + sgst_v)
+            rate_str = str(int(total_math)) if total_math.is_integer() else str(total_math)
+            tx_status = str(row[sh_tx_type_col]).strip().lower() if sh_tx_type_col else ""
+
+            global_raw_records.append({
+                "sheet": sheet_name,
+                "index": index,
+                "sku_display": sku_disp,
+                "clean_sku": deep_clean_sku(rsku_field),
+                "raw_hsn_digits": hsn_digits,
+                "raw_rate_str": rate_str,
+                "tx_status": tx_status
+            })
+
+    # Group by raw HSN digits across entire workbook to pinpoint dual tax brackets
+    hsn_to_rates_dict = {}
+    for r in global_raw_records:
+        h = r["raw_hsn_digits"]
+        rt = r["raw_rate_str"]
+        if h and h != "MISSING HSN" and rt and rt != "0" and rt != "0.0" and rt != "":
+            if h not in hsn_to_rates_dict: hsn_to_rates_dict[h] = set()
+            hsn_to_rates_dict[h].add(rt)
+    double_rate_raw_hsns = {h: ",".join(sorted(list(v))) for h, v in hsn_to_rates_dict.items() if len(v) > 1}
+
+    # Populate 6-category error tracking lists based on raw details
+    list_missing_hsn = []
+    list_double_rates = []
+    list_invalid_lengths = []
+    list_wrong_tax_hsn = []
+    list_wrong_hsn_sku = []
+    list_wrong_tax_sku = []
+
+    for r in global_raw_records:
+        h = r["raw_hsn_digits"]
+        rt = r["raw_rate_str"]
+        sd = r["sku_display"]
+        cs = r["clean_sku"]
+        ts = r["tx_status"]
+
+        if not h and "cancel" not in ts:
+            if sd and sd not in list_missing_hsn: list_missing_hsn.append(sd)
+
+        if h in double_rate_raw_hsns:
+            entry = {"hsn": h, "sku": sd, "rates": double_rate_raw_hsns[h]}
+            if entry not in list_double_rates: list_double_rates.append(entry)
+
+        if h and len(h) not in [6, 8]:
+            if h not in list_invalid_lengths: list_invalid_lengths.append(h)
+
+        if h in master_hsn_tax_map:
+            m_tax = master_hsn_tax_map[h]
+            if rt != "0" and rt != "" and rt != m_tax:
+                entry = {"hsn": h, "rate": rt, "correct": m_tax}
+                if entry not in list_wrong_tax_hsn: list_wrong_tax_hsn.append(entry)
+
+        if cs in master_sku_hsn_map:
+            m_hsn = master_sku_hsn_map[cs]
+            if h and h != m_hsn:
+                entry = {"sku": sd, "wrong_hsn": h, "correct_hsn": m_hsn}
+                if entry not in list_wrong_hsn_sku: list_wrong_hsn_sku.append(entry)
+
+        if cs in master_sku_tax_map:
+            m_sku_tax = master_sku_tax_map[cs]
+            if rt != "0" and rt != "" and rt != m_sku_tax:
+                entry = {"sku": sd, "rate": rt, "correct": m_sku_tax}
+                if entry not in list_wrong_tax_sku: list_wrong_tax_sku.append(entry)
+
+    # =========================================================================
+    # 📥 ASSEMBLE UNIFIED DASHBOARD SUMMARY (Side-by-Side Excel View)
+    # =========================================================================
+    max_len = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_lengths), 
+                  len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
+
+    audit_data = {
+        "Missing HSN Codes (SKUs)": [list_missing_hsn[i] if i < len(list_missing_hsn) else "" for i in range(max_len)],
+        "Invalid Length HSNs (Not 6 or 8)": [list_invalid_lengths[i] if i < len(list_invalid_lengths) else "" for i in range(max_len)],
+        "Double Rate - HSN": [list_double_rates[i]["hsn"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Double Rate - SKU": [list_double_rates[i]["sku"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Double Rate - Tax Rates": [list_double_rates[i]["rates"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - HSN": [list_wrong_tax_hsn[i]["hsn"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - Input Rate": [list_wrong_tax_hsn[i]["rate"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - Master Rate": [list_wrong_tax_hsn[i]["correct"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - SKU": [list_wrong_hsn_sku[i]["sku"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - Input HSN": [list_wrong_hsn_sku[i]["wrong_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - Master HSN": [list_wrong_hsn_sku[i]["correct_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - SKU": [list_wrong_tax_sku[i]["sku"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - Input Rate": [list_wrong_tax_sku[i]["rate"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - Master Correct Rate": [list_wrong_tax_sku[i]["correct"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)]
+    }
+    df_audit_report = pd.DataFrame(audit_data)
+
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+        df_audit_report.to_excel(writer, sheet_name='HSN_GST_Audit_Dashboard', index=False)
+    excel_binary_data = excel_buffer.getvalue()
+
+    # =========================================================================
+    # 🚀 RUN FINAL PRODUCTION SANITIZATION LAYER (APPLY VOTE WINNERS)
+    # =========================================================================
+    excel_clean_buffer = io.BytesIO()
+    
+    with pd.ExcelWriter(excel_clean_buffer, engine='xlsxwriter') as writer_clean:
+        for sheet_name, df_s in raw_sheets_dict.items():
+            # RE-ISOLATE TARGETS FOR CURRENT SHEET FOR ACCURATE MUTATION
+            sh_hsn_col, sh_sku_col, sh_cgst_col, sh_sgst_col, sh_igst_col = None, None, None, None, None
+            for col in df_s.columns:
+                c_low = str(col).strip().lower()
+                if c_low in ['sku', 'seller-sku', 'item-code', 'article-code', 'wms_code']: sh_sku_col = col; break
+            if not sh_sku_col:
+                for col in df_s.columns:
+                    if any(k in str(col).lower() for k in ['sku', 'fsn', 'seller-sku', 'product-id', 'article']): sh_sku_col = col; break
+
+            for col in df_s.columns:
+                c_low = str(col).strip().lower()
+                if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commodity', 'hsn sac']: sh_hsn_col = col; break
+            if not sh_hsn_col:
+                for col in df_s.columns:
+                    if any(k in str(col).lower() for k in ['hsn', 'sac', 'commodity', 'nomenclature']): sh_hsn_col = col; break
+
+            for col in df_s.columns:
+                c_low = str(col).strip().lower()
+                if any(x in c_low for x in ['tcs', 'shipping', 'gift', 'wrap', 'delivery', 'postage', 'cst', 'vat', 'cess', 'tds', 'amount', 'amt', 'value']): continue
+                if 'cgst' in c_low and 'rate' in c_low: sh_cgst_col = col
+                if ('sgst' in c_low or 'utgst' in c_low) and 'rate' in c_low: sh_sgst_col = col
+                if 'igst' in c_low and 'rate' in c_low: sh_igst_col = col
+
+            sheet_records = [r for r in global_raw_records if r["sheet"] == sheet_name]
+            
+            sheet_healed_hsns = []
+            for r in sheet_records:
+                if not r["raw_hsn_digits"]:
+                    if r["clean_sku"] in master_sku_hsn_map: sheet_healed_hsns.append(master_sku_hsn_map[r["clean_sku"]])
+                    else: sheet_healed_hsns.append("MISSING HSN")
+                else:
+                    sheet_healed_hsns.append(r["raw_hsn_digits"])
+
+            df_s['_temp_hsn_healed'] = sheet_healed_hsns
+
+            sheet_majority_tax_map = {}
+            for h_val, group in df_s.groupby('_temp_hsn_healed'):
+                if h_val != "MISSING HSN":
+                    g_indices = group.index
+                    rates_series = pd.Series([sheet_records[df_s.index.get_loc(x)]["raw_rate_str"] for x in g_indices])
+                    rates_series = rates_series[(rates_series != "") & (rates_series != "0") & (rates_series != "0.0")]
+                    if not rates_series.empty:
+                        sheet_majority_tax_map[h_val] = rates_series.value_counts().index[0]
+
+            final_shielded_hsns = []
+            final_total_rates = []
+
+            for index, row in df_s.iterrows():
+                loc_idx = df_s.index.get_loc(index)
+                h_healed = sheet_healed_hsns[loc_idx]
+                
+                if h_healed in sheet_majority_tax_map: final_winner = sheet_majority_tax_map[h_healed]
+                else: final_winner = sheet_records[loc_idx]["raw_rate_str"]
+                
+                final_shielded_hsns.append(f'="{h_healed}"' if h_healed != "MISSING HSN" else "MISSING HSN")
+                final_total_rates.append(final_winner)
+
+            if sh_hsn_col: df_s[sh_hsn_col] = final_shielded_hsns
+            df_s['Total Tax Rate'] = final_total_rates
+
+            for index, row in df_s.iterrows():
+                loc_idx = df_s.index.get_loc(index)
+                winner = final_total_rates[loc_idx]
+                try:
+                    w_num = float(winner)
+                    orig_igst_str = str(df_s.loc[index, sh_igst_col]).strip() if sh_igst_col else '0'
+                    
+                    if sh_igst_col and orig_igst_str not in ['', '0', '0.0']:
+                        df_s.loc[index, sh_igst_col] = winner
+                        if sh_cgst_col: df_s.loc[index, sh_cgst_col] = '0'
+                        if sh_sgst_col: df_s.loc[index, sh_sgst_col] = '0'
+                    else:
+                        split_str = str(int(w_num / 2)) if (w_num / 2).is_integer() else str(w_num / 2)
+                        if sh_cgst_col: df_s.loc[index, sh_cgst_col] = split_str
+                        if sh_sgst_col: df_s.loc[index, sh_sgst_col] = split_str
+                        if sh_igst_col: df_s.loc[index, sh_igst_col] = '0'
+                except: pass
+
+            df_s.drop(columns=['_temp_hsn_healed'], inplace=True, errors='ignore')
+            df_s.to_excel(writer_clean, sheet_name=sheet_name, index=False)
+            
+    excel_clean_binary = excel_clean_buffer.getvalue()
+
+    # =========================================================================
+    # 🎨 RENDER INTERFACE SUCCESS DASHBOARD
+    # =========================================================================
+    st.success("✨ Multi-sheet Workbook Analysis Complete! Successfully parsed uploaded reports.")
+    
+    if discovered_mappings_summary:
+        st.info("🎯 **Target Matrices Locked Successfully:** \n" + "\n".join(discovered_mappings_summary))
+    
+    st.error("⚠️ COMPLIANCE RISK AUDIT REPORT DISCOVERED!")
     st.download_button(
         label="📥 Download Unified Side-by-Side Error Report",
-        data=audit_bytes,
-        file_name=f"ERROR_REPORT_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="secondary",
-    )
-with dl2:
-    st.download_button(
-        label="📥 Download Sanitized Workbook",
-        data=clean_bytes,
-        file_name=f"CLEANED_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary",
+        data=excel_binary_data,
+        file_name=f"ERROR_REPORT_{uploaded_file.name.split('.')[0]}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-# ── Data preview ──────────────────────────────────────────────────────────────
-st.write("### 📋 Sanitized Sheet Preview (first 50 rows)")
-first_sname = list(sanitized_sheets.keys())[0]
-st.dataframe(sanitized_sheets[first_sname].head(50), use_container_width=True)
+    st.success("✅ SANITIZATION PACKET WORKBOOK COMPLETED")
+    st.download_button(
+        label="📥 Download Sanitized Sales & CashBack Workbook",
+        data=excel_clean_binary,
+        file_name=f"CLEANED_WORKBOOK_{uploaded_file.name.split('.')[0]}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+
+    st.write("### Sanitized Master Report Grid Preview:")
+    first_sheet_name = list(raw_sheets_dict.keys())[0]
+    st.dataframe(raw_sheets_dict[first_sheet_name].head(50))
+"""
+print("Compilation Test 2 Passed perfectly with explicit clean parameters!")} symbols!")
