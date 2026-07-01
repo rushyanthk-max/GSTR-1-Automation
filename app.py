@@ -99,7 +99,9 @@ def deep_clean_sku(val) -> str:
         s = s[4:]
     elif s.startswith("sku"):
         s = s[3:]
-    return re.sub(r"[^a-z0-9]", "", s)
+    s = re.sub(r'^[^a-z0-9]+', '', s)
+    s = re.sub(r'[^a-z0-9]', '', s)
+    return s
 
 
 def extract_rate_number(val) -> float:
