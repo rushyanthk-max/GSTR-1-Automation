@@ -34,7 +34,7 @@ def deep_clean_sku(sku_val):
     if pd.isna(sku_val):
         return ""
     s = str(sku_val).strip().lower()
-    s = re.sub(r'^|[`"\'\s]+|[`"\'\s]+$', '', s)
+    s = re.sub(r'^[`"\'\s]+|[`"\'\s]+$', '', s)
     s = s.replace('"', '').replace("'", "").replace("`", "")
     if s.startswith("sku:"):
         s = s[4:]
@@ -89,10 +89,13 @@ if uploaded_file:
             s_col = [c for c in df_s.columns if 'sku' in str(c).lower()][0]
             h_col = [c for c in df_s.columns if 'hsn' in str(c).lower() or 'sac' in str(c).lower()][0] if any('hsn' in c or 'sac' in c for c in cols_low) else None
             
+            subset = df_s[[o_col, oi_col, s_col]].dropna(subset=[o_col, oi_col])
+            subset.columns = ['Order ID', 'Order Item ID', 'SKU']
             if h_col:
-                subset = df_s[[o_col, oi_col, s_col, h_col]].dropna(subset=[o_col, oi_col])
-                subset.columns = ['Order ID', 'Order Item ID', 'SKU', 'HSN Code']
-                sales_lookup_df = pd.concat([sales_lookup_df, subset], ignore_index=True)
+                subset['HSN Code'] = df_s[h_col]
+            else:
+                subset['HSN Code'] = ""
+            sales_lookup_df = pd.concat([sales_lookup_df, subset], ignore_index=True)
     sales_lookup_df.drop_duplicates(subset=['Order ID', 'Order Item ID'], inplace=True)
 
     # 4. MAP MASTER PRODUCT CATALOG DICTIONARIES
@@ -186,7 +189,7 @@ if uploaded_file:
 
         # Save mapping confirmation info safely
         if sh_hsn_col or sh_sku_col:
-            discovered_mappings_summary.append(f"* **Sheet '{sheet_name}':** HSN Key: `{sh_hsn_col}` | SKU Key: `{sh_sku_col}`")
+            discovered_mappings_summary.append(f"* **Sheet '{sheet_name}':** HSN Key: `{sh_hsn_col if sh_hsn_col else 'Not Found'}` | SKU Key: `{sh_sku_col if sh_sku_col else 'Not Found'}`")
 
         # Build raw details row by row for current sheet
         for index, row in df_s.iterrows():
