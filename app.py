@@ -7,27 +7,26 @@ import io
 st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="centered")
 
 st.title("📦 BCPL Universal E-commerce GST Sanitizer")
-st.write("Upload your files to instantly clean transaction sheets and generate your unified multi-column Error Report based on raw data.")
+st.write("Upload your reports to instantly clean transaction sheets and generate your unified multi-column Error Report based on raw data.")
 
-# Robust helper function to handle dynamic data loads safely without accidental row corruption
-def load_data_safely(file_obj):
+# Robust helper function to handle dynamic data loads safely and clean header formatting
+def load_data_safely(file_obj, sheet_name=None):
     try:
         if file_obj.name.endswith(('.xlsx', '.xls')):
-            df = pd.read_excel(file_obj, dtype=str)
+            df = pd.read_excel(file_obj, sheet_name=sheet_name, dtype=str)
         else:
             df = pd.read_csv(file_obj, dtype=str, low_memory=False)
         
-        # Clean column names formatting whitespace
+        # Clean column names formatting whitespace strings
         df.columns = [str(c).strip() for c in df.columns]
         
-        # Check if HSN or SKU indicators are already found right out of the box
+        # Heuristic pass: If rows are completely empty above column names, re-align headers
         hsn_keywords = ['hsn', 'sac', 'commodity', 'nomenclature']
         sku_keywords = ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article']
         
         has_hsn = any(any(k in str(c).lower() for k in hsn_keywords) for c in df.columns)
         has_sku = any(any(k in str(c).lower() for k in sku_keywords) for c in df.columns)
         
-        # 🎯 CRITICAL FIX: Only run row scanning heuristics if we TRULY cannot find HSN or SKU headers
         if not (has_hsn or has_sku):
             for idx, row in df.iterrows():
                 row_vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
@@ -65,7 +64,24 @@ st.subheader("2️⃣ Step 2: Upload Master Product Attribute / Catalog File (Op
 attribute_file = st.file_uploader("Drop your Master Item Catalog sheet here to enable SKU/Tax audits and auto-healing", type=["xlsx", "xls", "csv"], key="attribute_sheet")
 
 if uploaded_file:
-    df_raw = load_data_safely(uploaded_file)
+    df_raw = None
+    
+    # DYNAMIC MULTI-SHEET TAB INTERCEPTOR
+    if uploaded_file.name.endswith(('.xlsx', '.xls')):
+        excel_file = pd.ExcelFile(uploaded_file)
+        sheet_names = excel_file.sheet_names
+        
+        # Scan names to auto-select the best transaction report tab target
+        default_index = 0
+        for idx, name in enumerate(sheet_names):
+            if any(k in name.lower() for k in ['sales', 'report', 'b2c', 'transaction', 'data']):
+                default_index = idx
+                break
+        
+        selected_sheet = st.selectbox("📂 Excel Workbook detected! Choose the sheet containing your sales data:", sheet_names, index=default_index)
+        df_raw = load_data_safely(uploaded_file, sheet_name=selected_sheet)
+    else:
+        df_raw = load_data_safely(uploaded_file)
     
     if df_raw is not None:
         df = df_raw.copy()
@@ -73,7 +89,7 @@ if uploaded_file:
         df.dropna(how='all', inplace=True)
         blank_rows = initial_rows - len(df)
 
-        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Insulated for Flipkart layouts)
+        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Flipkart & Amazon insulated)
         hsn_col, sku_col, cgst_col, sgst_col, igst_col, tx_type_col = None, None, None, None, None, None
         
         for col in df.columns:
@@ -219,7 +235,9 @@ if uploaded_file:
                 raw_hsn_codes.append(hsn_digits)
 
                 raw_sku_val = str(row[sku_col]).strip() if pd.notna(row[sku_col]) else ""
-                raw_sku_display = re.sub(r'^["\'`]+|["\'`]+$', '', raw_sku_val)
+                raw_sku_display = re.sub(r'^["\'`\s]+|["\'`\s]+$', '', raw_sku_val)
+                if raw_sku_display.startswith("SKU:"):
+                    raw_sku_display = raw_sku_display[4:]
                 raw_sku_displays.append(raw_sku_display)
                 
                 if igst_series[index] > 0: total_math = igst_series[index]
