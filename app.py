@@ -34,7 +34,7 @@ def deep_clean_sku(sku_val):
     if pd.isna(sku_val):
         return ""
     s = str(sku_val).strip().lower()
-    s = re.sub(r'^[`"\'\s]+|[`"\'\s]+$', '', s)
+    s = re.sub(r'^|[`"\'\s]+|[`"\'\s]+$', '', s)
     s = s.replace('"', '').replace("'", "").replace("`", "")
     if s.startswith("sku:"):
         s = s[4:]
@@ -149,9 +149,10 @@ if uploaded_file:
     # 🕵️‍♂️ COMPUTE COMPLETE RAW AUDIT RECORDS AND COMPILE ERROR REPORT
     # =========================================================================
     global_raw_records = []
+    discovered_mappings_summary = []
     
     for sheet_name, df_s in raw_sheets_dict.items():
-        # Identify headers for current sheet
+        # Identify headers for current sheet dynamically
         sh_hsn_col, sh_sku_col, sh_cgst_col, sh_sgst_col, sh_igst_col, sh_tx_type_col = None, None, None, None, None, None
         sh_oid_col, sh_oiid_col = None, None
 
@@ -183,9 +184,12 @@ if uploaded_file:
             if ('sgst' in c_low or 'utgst' in c_low) and 'rate' in c_low: sh_sgst_col = col
             if 'igst' in c_low and 'rate' in c_low: sh_igst_col = col
 
+        # Save mapping confirmation info safely
+        if sh_hsn_col or sh_sku_col:
+            discovered_mappings_summary.append(f"* **Sheet '{sheet_name}':** HSN Key: `{sh_hsn_col}` | SKU Key: `{sh_sku_col}`")
+
         # Build raw details row by row for current sheet
         for index, row in df_s.iterrows():
-            # Handle cross-tab lookup if sheet lacks HSN or SKU directly
             rhsn_field, rsku_field = "", ""
             if sh_hsn_col: rhsn_field = str(row[sh_hsn_col]).strip() if pd.notna(row[sh_hsn_col]) else ""
             if sh_sku_col: rsku_field = str(row[sh_sku_col]).strip() if pd.notna(row[sh_sku_col]) else ""
@@ -400,7 +404,10 @@ if uploaded_file:
     # =========================================================================
     # 🎨 RENDER INTERFACE SUCCESS DASHBOARD
     # =========================================================================
-    st.success(f"✨ Multi-sheet Workbook Analysis Complete! Successfully parsed uploaded reports.")
+    st.success("✨ Multi-sheet Workbook Analysis Complete! Successfully parsed uploaded reports.")
+    
+    if discovered_mappings_summary:
+        st.info("🎯 **Target Matrices Locked Successfully:** \n" + "\n".join(discovered_mappings_summary))
     
     st.error("⚠️ COMPLIANCE RISK AUDIT REPORT DISCOVERED!")
     st.download_button(
