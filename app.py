@@ -118,7 +118,7 @@ if uploaded_file:
 
         for c in attr_df.columns:
             cl = str(c).strip().lower()
-            if cl in ['hsn', 'hsn/sac', 'hsn_code', 'hsncode', 'commoditycode', 'producttaxcode']: attr_hsn_col = c; break
+            if cl in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commoditycode', 'producttaxcode']: attr_hsn_col = c; break
         if not attr_hsn_col:
             for c in attr_df.columns:
                 cl = str(c).strip().lower()
@@ -271,38 +271,43 @@ if uploaded_file:
                 if entry not in list_wrong_hsn_sku: list_wrong_hsn_sku.append(entry)
 
         if cs in master_sku_tax_map:
-            m_s_tax = master_sku_tax_map[cs]
-            if rt != "0" and rt != "" and rt != m_s_tax:
-                entry = {"sku": sd, "rate": rt, "correct": m_s_tax}
+            m_sku_tax = master_sku_tax_map[cs]
+            if rt != "0" and rt != "" and rt != m_sku_tax:
+                entry = {"sku": sd, "rate": rt, "correct": m_sku_tax}
                 if entry not in list_wrong_tax_sku: list_wrong_tax_sku.append(entry)
 
-    # Compile side-by-side dashboard structure
-    m_len = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_lengths), len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
-    audit_dashboard_data = {
-        "Missing HSN Codes (SKUs)": [list_missing_hsn[i] if i < len(list_missing_hsn) else "" for i in range(m_len)],
-        "Invalid Length HSNs (Not 6 or 8)": [list_invalid_lengths[i] if i < len(list_invalid_lengths) else "" for i in range(m_len)],
-        "Double Rate - HSN": [list_double_rates[i]["hsn"] if i < len(list_double_rates) else "" for i in range(m_len)],
-        "Double Rate - SKU": [list_double_rates[i]["sku"] if i < len(list_double_rates) else "" for i in range(m_len)],
-        "Double Rate - Tax Rates": [list_double_rates[i]["rates"] if i < len(list_double_rates) else "" for i in range(m_len)],
-        "Wrong Tax by HSN - HSN": [list_wrong_tax_hsn[i]["hsn"] if i < len(list_wrong_tax_hsn) else "" for i in range(m_len)],
-        "Wrong Tax by HSN - Input Rate": [list_wrong_tax_hsn[i]["rate"] if i < len(list_wrong_tax_hsn) else "" for i in range(m_len)],
-        "Wrong Tax by HSN - Master Rate": [list_wrong_tax_hsn[i]["correct"] if i < len(list_wrong_tax_hsn) else "" for i in range(m_len)],
-        "Wrong HSN by SKU - SKU": [list_wrong_hsn_sku[i]["sku"] if i < len(list_wrong_hsn_sku) else "" for i in range(m_len)],
-        "Wrong HSN by SKU - Input HSN": [list_wrong_hsn_sku[i]["wrong_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(m_len)],
-        "Wrong HSN by SKU - Master HSN": [list_wrong_hsn_sku[i]["correct_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(m_len)],
-        "Incorrect GST Rates - SKU": [list_wrong_tax_sku[i]["sku"] if i < len(list_wrong_tax_sku) else "" for i in range(m_len)],
-        "Incorrect GST Rates - Input Rate": [list_wrong_tax_sku[i]["rate"] if i < len(list_wrong_tax_sku) else "" for i in range(m_len)],
-        "Incorrect GST Rates - Master Correct Rate": [list_wrong_tax_sku[i]["correct"] if i < len(list_wrong_tax_sku) else "" for i in range(m_len)]
-    }
-    df_audit_dashboard = pd.DataFrame(audit_dashboard_data)
+    # =========================================================================
+    # 📥 ASSEMBLE UNIFIED DASHBOARD SUMMARY (Side-by-Side Excel View)
+    # =========================================================================
+    max_len = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_lengths), 
+                  len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
 
-    excel_err_buffer = io.BytesIO()
-    with pd.ExcelWriter(excel_err_buffer, engine='xlsxwriter') as wr_err:
-        df_audit_dashboard.to_excel(wr_err, sheet_name='HSN_GST_Audit_Dashboard', index=False)
-    excel_err_binary = excel_err_buffer.getvalue()
+    audit_data = {
+        "Missing HSN Codes (SKUs)": [list_missing_hsn[i] if i < len(list_missing_hsn) else "" for i in range(max_len)],
+        "Invalid Length HSNs (Not 6 or 8)": [list_invalid_lengths[i] if i < len(list_invalid_lengths) else "" for i in range(max_len)],
+        "Double Rate - HSN": [list_double_rates[i]["hsn"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Double Rate - SKU": [list_double_rates[i]["sku"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Double Rate - Tax Rates": [list_double_rates[i]["rates"] if i < len(list_double_rates) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - HSN": [list_wrong_tax_hsn[i]["hsn"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - Input Rate": [list_wrong_tax_hsn[i]["rate"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong Tax by HSN - Master Rate": [list_wrong_tax_hsn[i]["correct"] if i < len(list_wrong_tax_hsn) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - SKU": [list_wrong_hsn_sku[i]["sku"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - Input HSN": [list_wrong_hsn_sku[i]["wrong_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Wrong HSN by SKU - Master HSN": [list_wrong_hsn_sku[i]["correct_hsn"] if i < len(list_wrong_hsn_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - SKU": [list_wrong_tax_sku[i]["sku"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - Input Rate": [list_wrong_tax_sku[i]["rate"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)],
+        "Incorrect GST Rates - Master Correct Rate": [list_wrong_tax_sku[i]["correct"] if i < len(list_wrong_tax_sku) else "" for i in range(max_len)]
+    }
+    df_audit_report = pd.DataFrame(audit_data)
+
+    excel_buffer = io.BytesIO()
+    with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
+        df_audit_report.to_excel(writer, sheet_name='HSN_GST_Audit_Dashboard', index=False)
+    excel_buffer.seek(0)
+    excel_binary_data = excel_buffer.getvalue()
 
     # =========================================================================
-    # 🚀 RUN WORKBOOK SANITIZATION AND SPLIT BALANCE RE-WRITING
+    # 🚀 RUN FINAL PRODUCTION SANITIZATION LAYER (APPLY VOTE WINNERS)
     # =========================================================================
     excel_clean_buffer = io.BytesIO()
     
@@ -331,10 +336,8 @@ if uploaded_file:
                 if ('sgst' in c_low or 'utgst' in c_low) and 'rate' in c_low: sh_sgst_col = col
                 if 'igst' in c_low and 'rate' in c_low: sh_igst_col = col
 
-            # Isolate current sheet row slices out of our centralized processed master raw record pool
             sheet_records = [r for r in global_raw_records if r["sheet"] == sheet_name]
             
-            # Step A: Perform cross-catalog lookup fill to fix initial missing spaces
             sheet_healed_hsns = []
             for r in sheet_records:
                 if not r["raw_hsn_digits"]:
@@ -345,7 +348,6 @@ if uploaded_file:
 
             df_s['_temp_hsn_healed'] = sheet_healed_hsns
 
-            # Step B: Identify the majority voting tax bracket winner inside this tab sheet
             sheet_majority_tax_map = {}
             for h_val, group in df_s.groupby('_temp_hsn_healed'):
                 if h_val != "MISSING HSN":
@@ -355,7 +357,6 @@ if uploaded_file:
                     if not rates_series.empty:
                         sheet_majority_tax_map[h_val] = rates_series.value_counts().index[0]
 
-            # Step C: Write back final values and split parameters cleanly
             final_shielded_hsns = []
             final_total_rates = []
 
@@ -369,11 +370,9 @@ if uploaded_file:
                 final_shielded_hsns.append(f'="{h_healed}"' if h_healed != "MISSING HSN" else "MISSING HSN")
                 final_total_rates.append(final_winner)
 
-            # Insert HSN protective text formula and dynamic Total Tax Rate column
             if sh_hsn_col: df_s[sh_hsn_col] = final_shielded_hsns
             df_s['Total Tax Rate'] = final_total_rates
 
-            # Synchronize CGST/SGST/IGST column configurations to perfectly match the winner rate
             for index, row in df_s.iterrows():
                 loc_idx = df_s.index.get_loc(index)
                 winner = final_total_rates[loc_idx]
@@ -393,22 +392,20 @@ if uploaded_file:
                 except: pass
 
             df_s.drop(columns=['_temp_hsn_healed'], inplace=True, errors='ignore')
-            
-            # Save sanitized dataframe sheet into workbook buffer
             df_s.to_excel(writer_clean, sheet_name=sheet_name, index=False)
             
     excel_clean_buffer.seek(0)
     excel_clean_binary = excel_clean_buffer.getvalue()
 
     # =========================================================================
-    # 🎨 RENDER DASHBOARD DOWNLOADS HUD
+    # 🎨 RENDER INTERFACE SUCCESS DASHBOARD
     # =========================================================================
     st.success(f"✨ Multi-sheet Workbook Analysis Complete! Successfully parsed uploaded reports.")
     
     st.error("⚠️ COMPLIANCE RISK AUDIT REPORT DISCOVERED!")
     st.download_button(
         label="📥 Download Unified Side-by-Side Error Report",
-        data=excel_err_binary,
+        data=excel_binary_data,
         file_name=f"ERROR_REPORT_{uploaded_file.name.split('.')[0]}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
