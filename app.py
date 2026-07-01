@@ -9,7 +9,7 @@ st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="
 st.title("📦 BCPL Universal E-commerce GST Sanitizer")
 st.write("Upload your files to instantly clean transaction sheets and generate your unified multi-column Error Report based on raw data.")
 
-# Robust helper function to handle dynamic data loads and skip blank spacer rows above headers
+# Robust helper function to handle dynamic data loads safely without accidental row corruption
 def load_data_safely(file_obj):
     try:
         if file_obj.name.endswith(('.xlsx', '.xls')):
@@ -17,14 +17,21 @@ def load_data_safely(file_obj):
         else:
             df = pd.read_csv(file_obj, dtype=str, low_memory=False)
         
-        # Clean column names
+        # Clean column names formatting whitespace
         df.columns = [str(c).strip() for c in df.columns]
         
-        # If columns look unnamed or default numbers, scan rows for the true header indicators
-        if any('unnamed' in str(c).lower() for c in df.columns) or all(str(c).isdigit() for c in df.columns):
+        # Check if HSN or SKU indicators are already found right out of the box
+        hsn_keywords = ['hsn', 'sac', 'commodity', 'nomenclature']
+        sku_keywords = ['sku', 'fsn', 'seller-sku', 'item-code', 'product-id', 'article']
+        
+        has_hsn = any(any(k in str(c).lower() for k in hsn_keywords) for c in df.columns)
+        has_sku = any(any(k in str(c).lower() for k in sku_keywords) for c in df.columns)
+        
+        # 🎯 CRITICAL FIX: Only run row scanning heuristics if we TRULY cannot find HSN or SKU headers
+        if not (has_hsn or has_sku):
             for idx, row in df.iterrows():
                 row_vals = [str(v).strip().lower() for v in row.values if pd.notna(v)]
-                if any('hsn' in v or 'sku' in v or 'fsn' in v for v in row_vals):
+                if any(v in ['hsn', 'hsn code', 'hsn/sac', 'sku', 'seller sku', 'fsn'] for v in row_vals):
                     df.columns = [str(v).strip() for v in row.values]
                     df = df.iloc[idx + 1:].reset_index(drop=True)
                     break
@@ -232,7 +239,7 @@ if uploaded_file:
             double_rate_raw_hsns = {h: ",".join(sorted(list(v))) for h, v in hsn_to_rates_map.items() if len(v) > 1}
 
             # =========================================================================
-            # 🕵️‍♂️ RUN AUDIT CHECKS EXcCLUSIVELY ON UN-MUTATED RAW DATA ARRAYS
+            # 🕵️‍♂️ RUN AUDIT CHECKS EXCLUSIVELY ON UN-MUTATED RAW DATA ARRAYS
             # =========================================================================
             list_missing_hsn = []
             list_double_rates = []
@@ -290,7 +297,7 @@ if uploaded_file:
                             list_wrong_tax_sku.append(entry)
 
             # =========================================================================
-            # 📥 ASSEMBLE UNIFIED SIDE-BY-SIDE EXCEL VIEW
+            # 📥 ASSEMBLE UNIFIED DASHBOARD SUMMARY (Side-by-Side Excel View)
             # =========================================================================
             max_len = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_lengths), 
                           len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
