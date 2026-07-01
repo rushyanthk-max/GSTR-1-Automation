@@ -7,7 +7,7 @@ import io
 st.set_page_config(page_title="BCPL Universal GST Sanitizer & Auditor", layout="centered")
 
 st.title("📦 BCPL Universal E-commerce GST Sanitizer")
-st.write("Upload your files to instantly clean transaction sheets and generate your unified multi-column Error Report.")
+st.write("Upload your files to instantly clean transaction sheets and generate your unified multi-column Error Report based on raw data.")
 
 # Robust helper function to handle dynamic data loads and skip blank spacer rows above headers
 def load_data_safely(file_obj):
@@ -29,11 +29,18 @@ def load_data_safely(file_obj):
         st.error(f"Error reading file '{file_obj.name}': {str(e)}")
         return None
 
-# AGGRESSIVE DEEP CLEAN LAYER FOR SKUS
+# FLUENT DEEP CLEAN LAYER FOR SKUS (Insulated against Flipkart "SKU:" and quotes)
 def deep_clean_sku(sku_val):
     if pd.isna(sku_val):
         return ""
     s = str(sku_val).strip().lower()
+    s = re.sub(r'^[`"\'\s]+|[`"\'\s]+$', '', s)
+    s = s.replace('"', '').replace("'", "").replace("`", "")
+    if s.startswith("sku:"):
+        s = s[4:]
+    elif s.startswith("sku"):
+        s = s[3:]
+    s = re.sub(r'^[^a-z0-9]+', '', s)
     s = re.sub(r'[^a-z0-9]', '', s)
     return s
 
@@ -55,7 +62,7 @@ if uploaded_file:
         df.dropna(how='all', inplace=True)
         blank_rows = initial_rows - len(df)
 
-        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Insulated for Flipkart Layouts)
+        # 2. SMART UNIVERSAL KEYWORD COLUMN SCANNER (Main Sheet)
         hsn_col, sku_col, cgst_col, sgst_col, igst_col, tx_type_col = None, None, None, None, None, None
         
         for col in df.columns:
@@ -72,7 +79,6 @@ if uploaded_file:
 
         for col in df.columns:
             c_low = str(col).strip().lower()
-            # Added explicit space parameters ('hsn code', 'hsn sac') to isolate Flipkart columns natively
             if c_low in ['hsn', 'hsn/sac', 'hsn_sac', 'hsncode', 'hsn code', 'hsn_code', 'commodity', 'hsn sac']:
                 hsn_col = col
                 break
@@ -85,7 +91,7 @@ if uploaded_file:
 
         for col in df.columns:
             c_low = str(col).strip().lower()
-            if any(k in c_low for k in ['transaction type', 'type', 'status', 'order status', 'transaction_type', 'order_status']):
+            if any(k in c_low for k in ['transaction type', 'type', 'status', 'order status', 'transaction_type', 'order_status', 'event type']):
                 tx_type_col = col
                 break
 
@@ -100,6 +106,7 @@ if uploaded_file:
 
         # 3. EXECUTE RECONCILIATION AND REPORT BUILDING
         if hsn_col:
+            # Clean standard layout formats safely
             df[hsn_col] = df[hsn_col].fillna("").astype(str).str.strip().str.replace(r'\.0+$', '', regex=True)
             if sku_col:
                 df[sku_col] = df[sku_col].fillna("").astype(str).str.strip()
@@ -173,72 +180,61 @@ if uploaded_file:
                         if raw_sku_clean not in master_sku_hsn_map:
                             master_sku_hsn_map[raw_sku_clean] = clean_hsn
 
-            # PASS A: COMPUTE ORIGINAL TAX RATES
+            # PASS A: EXTRACT RAW UN-MODIFIED TAX RATES AND HSN DIGITS ROW BY ROW
             def extract_rate_number(val):
                 if pd.isna(val) or str(val).strip() in ['', 'nan', 'None', '<NA>']: return 0.0
                 s = str(val).strip().replace('%', '')
                 s = re.sub(r'\.0+$', '', s)
                 if s in ['0.018', '0.005', '0.012', '0.028']: s = str(float(s) * 10)
                 digits = "".join(c for c in s if c.isdigit() or c == '.')
-                try: return float(digits) if digits else 0.0
+                try: 
+                    num = float(digits) if digits else 0.0
+                    if num > 0 and num <= 1.0: num = num * 100
+                    return num
                 except: return 0.0
 
             cgst_series = df[cgst_col].apply(extract_rate_number) if cgst_col else pd.Series(0.0, index=df.index)
             sgst_series = df[sgst_col].apply(extract_rate_number) if sgst_col else pd.Series(0.0, index=df.index)
             igst_series = df[igst_col].apply(extract_rate_number) if igst_col else pd.Series(0.0, index=df.index)
 
-            if cgst_series.max() > 0 and cgst_series.max() <= 1.0: cgst_series = cgst_series * 100
-            if sgst_series.max() > 0 and sgst_series.max() <= 1.0: sgst_series = sgst_series * 100
-            if igst_series.max() > 0 and igst_series.max() <= 1.0: igst_series = igst_series * 100
-
-            original_total_rates = []
-            for idx in df.index:
-                if igst_series[idx] > 0: total_math = igst_series[idx]
-                else: total_math = cgst_series[idx] + sgst_series[idx]
-                original_total_rates.append(str(int(total_math)) if total_math.is_integer() else str(total_math))
-
-            # PASS B: REPAIR HSN ENCODINGS
-            pure_numeric_hsns = []
-            for index, row in df.iterrows():
-                val = str(row[hsn_col]).strip() if pd.notna(row[hsn_col]) else ""
-                sku_raw_val = str(row[sku_col]) if sku_col and pd.notna(row[sku_col]) else ""
-                sku_clean_val = deep_clean_sku(sku_raw_val)
-                
-                if val.startswith('="') and val.endswith('"'): val = val[2:-1]
-                val_clean = "".join(filter(str.isdigit, re.sub(r'[\s\-\.\/]', '', val)))
-                
-                if not val_clean or val_clean in ["", "nan", "none"]:
-                    if sku_clean_val in master_sku_hsn_map:
-                        val_clean = master_sku_hsn_map[sku_clean_val]
-                    else:
-                        val_clean = "MISSING HSN"
-                
-                if val_clean != "MISSING HSN":
-                    if len(val_clean) == 7: val_clean = "0" + val_clean
-                    pure_numeric_hsns.append(val_clean)
-                else:
-                    pure_numeric_hsns.append("MISSING HSN")
-            df['_temp_hsn_pure'] = pure_numeric_hsns
-
-            # PASS C: CAPTURE DUAL TAX RATE GROUPS
-            double_rate_hsn_list = {}
-            hsn_majority_tax_map = {}
+            raw_total_rates = []
+            raw_hsn_codes = []
+            raw_sku_displays = []
             
-            for hsn_val, group in df.groupby('_temp_hsn_pure'):
-                if hsn_val != "MISSING HSN":
-                    group_indices = group.index
-                    rates_in_group = [original_total_rates[df.index.get_loc(idx)] for idx in group_indices]
-                    rates_series = pd.Series(rates_in_group)
-                    rates_series = rates_series[(rates_series != "") & (rates_series != "0") & (rates_series != "0.0")]
-                    
-                    if not rates_series.empty:
-                        unique_rates = rates_series.unique()
-                        if len(unique_rates) > 1:
-                            double_rate_hsn_list[hsn_val] = ",".join(sorted(unique_rates))
-                        hsn_majority_tax_map[hsn_val] = rates_series.value_counts().index[0]
+            for index, row in df.iterrows():
+                # Isolate raw input HSN digit blocks
+                val = str(row[hsn_col]).strip() if pd.notna(row[hsn_col]) else ""
+                if val.startswith('="') and val.endswith('"'): val = val[2:-1]
+                val_clean = re.sub(r'[\s\-\.\/]', '', val)
+                hsn_digits = "".join(filter(str.isdigit, val_clean))
+                if len(hsn_digits) == 7: hsn_digits = "0" + hsn_digits
+                raw_hsn_codes.append(hsn_digits)
+
+                # Isolate clean raw SKU strings for spreadsheet tracking
+                raw_sku_val = str(row[sku_col]).strip() if pd.notna(row[sku_col]) else ""
+                raw_sku_display = re.sub(r'^["\'`]+|["\'`]+$', '', raw_sku_val)
+                raw_sku_displays.append(raw_sku_display)
+
+                # Calculate input raw rates
+                if igst_series[index] > 0: total_math = igst_series[index]
+                else: total_math = cgst_series[index] + sgst_series[index]
+                raw_total_rates.append(str(int(total_math)) if total_math.is_integer() else str(total_math))
+
+            # Store computed baseline mapping inside our unmutated preview layout frames
+            df_raw['Calculated Total Tax Rate'] = raw_total_rates
+
+            # PASS B: COMPUTE DUAL TAX RATE BRAKETS STATED WITHIN THE RAW UPLOAD
+            hsn_to_rates_map = {}
+            for idx, h_code in enumerate(raw_hsn_codes):
+                rt = raw_total_rates[idx]
+                if h_code and rt and rt != "0" and rt != "0.0":
+                    if h_code not in hsn_to_rates_map: hsn_to_rates_map[h_code] = set()
+                    hsn_to_rates_map[h_code].add(rt)
+            
+            double_rate_raw_hsns = {h: ",".join(sorted(list(v))) for h, v in hsn_to_rates_map.items() if len(v) > 1}
 
             # =========================================================================
-            # 🕵️‍♂️ ISOLATE DISCREPANCIES FOR UNIFIED DASHBOARD SUMMARY
+            # 🕵️‍♂️ RUN LOG CHECKING EXCLUSIVELY ON UN-MUTATED RAW ARRAYS
             # =========================================================================
             list_missing_hsn = []
             list_double_rates = []
@@ -249,51 +245,49 @@ if uploaded_file:
 
             for index, row in df.iterrows():
                 loc_idx = df.index.get_loc(index)
-                current_hsn = pure_numeric_hsns[loc_idx]
-                current_rate = original_total_rates[loc_idx]
-                raw_sku = str(row[sku_col]) if sku_col else ""
-                clean_sku = deep_clean_sku(raw_sku)
+                rhsn = raw_hsn_codes[loc_idx]
+                rrate = raw_total_rates[loc_idx]
+                rsku_disp = raw_sku_displays[loc_idx]
+                csku = deep_clean_sku(str(row[sku_col]))
                 tx_status = str(row[tx_type_col]).strip().lower() if tx_type_col else ""
 
-                # Error 1: Missing HSN (No Cancels)
-                if current_hsn == "MISSING HSN" and "cancel" not in tx_status:
-                    if raw_sku and raw_sku not in list_missing_hsn:
-                        list_missing_hsn.append(raw_sku)
+                # Error 1: Raw HSN code is completely missing or empty (ignoring cancelled rows)
+                if not rhsn and "cancel" not in tx_status:
+                    if rsku_disp and rsku_disp not in list_missing_hsn:
+                        list_missing_hsn.append(rsku_disp)
 
-                # Error 2: Double Tax Rates
-                if current_hsn in double_rate_hsn_list:
-                    entry = {"hsn": current_hsn, "sku": raw_sku, "rates": double_rate_hsn_list[current_hsn]}
+                # Error 2: HSN belongs to a raw double tax bracket group conflict
+                if rhsn in double_rate_raw_hsns:
+                    entry = {"hsn": rhsn, "sku": rsku_disp, "rates": double_rate_raw_hsns[rhsn]}
                     if entry not in list_double_rates:
                         list_double_rates.append(entry)
 
-                # Error 3: Invalid Digit Lengths (Not 6 or 8)
-                if current_hsn != "MISSING HSN" and len(current_hsn) not in [6, 8]:
-                    if current_hsn not in list_invalid_lengths:
-                        list_invalid_lengths.append(current_hsn)
+                # Error 3: Raw HSN length is non-compliant (neither 6 nor 8 digits)
+                if rhsn and len(rhsn) not in [6, 8]:
+                    if rhsn not in list_invalid_lengths:
+                        list_invalid_lengths.append(rhsn)
 
-                # Error 4: Wrong Tax Rates (by HSN Mapping)
-                if current_hsn in master_hsn_tax_map:
-                    master_expected_tax = master_hsn_tax_map[current_hsn]
-                    if current_rate != "0" and current_rate != "" and current_rate != master_expected_tax:
-                        entry = {"hsn": current_hsn, "rate": current_rate, "correct": master_expected_tax}
+                # Error 4: Verify HSN configuration against Master Catalog tax rule
+                if rhsn in master_hsn_tax_map:
+                    m_tax = master_hsn_tax_map[rhsn]
+                    if rrate != "0" and rrate != "" and rrate != m_tax:
+                        entry = {"hsn": rhsn, "rate": rrate, "correct": m_tax}
                         if entry not in list_wrong_tax_hsn:
                             list_wrong_tax_hsn.append(entry)
 
-                # Error 5: Wrong HSN Code (by SKU mapping)
-                if clean_sku in master_sku_hsn_map:
-                    master_expected_hsn = master_sku_hsn_map[clean_sku]
-                    orig_hsn_val = "".join(filter(str.isdigit, str(row[hsn_col])))
-                    if len(orig_hsn_val) == 7: orig_hsn_val = "0" + orig_hsn_val
-                    if orig_hsn_val and orig_hsn_val != master_expected_hsn:
-                        entry = {"sku": raw_sku, "wrong_hsn": orig_hsn_val, "correct_hsn": master_expected_hsn}
+                # Error 5: Verify if Input HSN conflicts with SKU record in Catalog
+                if csku in master_sku_hsn_map:
+                    m_hsn = master_sku_hsn_map[csku]
+                    if rhsn and rhsn != m_hsn:
+                        entry = {"sku": rsku_disp, "wrong_hsn": rhsn, "correct_hsn": m_hsn}
                         if entry not in list_wrong_hsn_sku:
                             list_wrong_hsn_sku.append(entry)
 
-                # Error 6: Wrong Tax Rate (by SKU mapping)
-                if clean_sku in master_sku_tax_map:
-                    master_expected_sku_tax = master_sku_tax_map[clean_sku]
-                    if current_rate != "0" and current_rate != "" and current_rate != master_expected_sku_tax:
-                        entry = {"sku": raw_sku, "rate": current_rate, "correct": master_expected_sku_tax}
+                # Error 6: Verify if Input Tax Rate conflicts with SKU record in Catalog
+                if csku in master_sku_tax_map:
+                    m_sku_tax = master_sku_tax_map[csku]
+                    if rrate != "0" and rrate != "" and rrate != m_sku_tax:
+                        entry = {"sku": rsku_disp, "rate": rrate, "correct": m_sku_tax}
                         if entry not in list_wrong_tax_sku:
                             list_wrong_tax_sku.append(entry)
 
@@ -321,7 +315,7 @@ if uploaded_file:
             }
             df_audit_report = pd.DataFrame(audit_data)
 
-            # Compile into native binary stream packet 
+            # Compile dashboard summary into binary stream packet
             excel_buffer = io.BytesIO()
             with pd.ExcelWriter(excel_buffer, engine='xlsxwriter') as writer:
                 df_audit_report.to_excel(writer, sheet_name='HSN_GST_Audit_Dashboard', index=False)
@@ -329,32 +323,69 @@ if uploaded_file:
             excel_binary_data = excel_buffer.getvalue()
 
             # =========================================================================
-            # 🚀 RUN PRODUCTION SANITIZATION (APPLY CLEAN VOTE OUTCOMES)
+            # 🚀 RUN PRODUCTION SANITIZATION LAYER (AUTO-HEAL AND CORRECT PACETS)
             # =========================================================================
-            sanitized_hsns = []
-            sanitized_rates = []
+            healed_hsns = []
+            healed_total_rates = []
 
+            # Step 1: Resolve missing holes using catalog rules first
+            for idx, h_code in enumerate(raw_hsn_codes):
+                csku = deep_clean_sku(df.loc[idx, sku_col]) if sku_col else ""
+                if not h_code:
+                    if csku in master_sku_hsn_map: healed_hsns.append(master_sku_hsn_map[csku])
+                    else: healed_hsns.append("MISSING HSN")
+                else:
+                    healed_hsns.append(h_code)
+
+            # Inject a temporary healed column marker to group rows by for majority vote winning
+            df['_temp_hsn_healed'] = healed_hsns
+
+            # Step 2: Establish the final commercial tax vote winners based on healed groups
+            healed_hsn_majority_map = {}
+            for h_val, group in df.groupby('_temp_hsn_healed'):
+                if h_val != "MISSING HSN":
+                    g_indices = group.index
+                    rates_in_g = pd.Series([raw_total_rates[df.index.get_loc(x)] for x in g_indices])
+                    rates_in_g = rates_in_g[(rates_in_g != "") & (rates_in_g != "0") & (rates_in_g != "0.0")]
+                    if not rates_in_g.empty:
+                        healed_hsn_majority_map[h_val] = rates_in_g.value_counts().index[0]
+
+            # Step 3: Overwrite and synchronize values back onto final sheets
+            sanitized_hsns = []
             for index, row in df.iterrows():
                 loc_idx = df.index.get_loc(index)
-                current_hsn = pure_numeric_hsns[loc_idx]
+                h_healed = healed_hsns[loc_idx]
                 
-                if current_hsn in hsn_majority_tax_map:
-                    final_rate = hsn_majority_tax_map[current_hsn]
-                else:
-                    final_rate = original_total_rates[loc_idx]
+                if h_healed in healed_hsn_majority_map: final_winner_rate = healed_hsn_majority_map[h_healed]
+                else: final_winner_rate = raw_total_rates[loc_idx]
                 
-                sanitized_hsns.append(f'="{current_hsn}"' if current_hsn != "MISSING HSN" else "MISSING HSN")
-                sanitized_rates.append(final_rate)
+                sanitized_hsns.append(f'="{h_healed}"' if h_healed != "MISSING HSN" else "MISSING HSN")
+                healed_total_rates.append(final_winner_rate)
 
+            # Apply final clean alignment and add the newly created Total Tax Rate column
             df[hsn_col] = sanitized_hsns
-            if cgst_col and sgst_col:
-                splits = [str(int(float(r)/2)) if (float(r)/2).is_integer() else str(float(r)/2) for r in sanitized_rates]
-                df[cgst_col] = splits
-                df[sgst_col] = splits
-            if igst_col:
-                df[igst_col] = sanitized_rates
+            df['Total Tax Rate'] = healed_total_rates
 
-            df.drop(columns=['_temp_hsn_pure'], inplace=True, errors='ignore')
+            # Sync individual split tax columns back to reflect the majority winner
+            for index, row in df.iterrows():
+                loc_idx = df.index.get_loc(index)
+                winner = healed_total_rates[loc_idx]
+                try:
+                    w_num = float(winner)
+                    # If raw line used IGST mapping pattern
+                    if igst_col and str(df_raw.loc[index, igst_col]).strip() not in ['', '0', '0.0']:
+                        df.loc[index, igst_col] = winner
+                        if cgst_col: df.loc[index, cgst_col] = '0'
+                        if sgst_col: df.loc[index, sgst_col] = '0'
+                    elif cgst_col and sgst_col:
+                        split_str = str(int(w_num / 2)) if (w_num / 2).is_integer() else str(w_num / 2)
+                        df.loc[index, cgst_col] = split_str
+                        df.loc[index, sgst_col] = split_str
+                        if igst_col: df.loc[index, igst_col] = '0'
+                except:
+                    pass
+
+            df.drop(columns=['_temp_hsn_healed'], inplace=True, errors='ignore')
 
             # =========================================================================
             # 🎨 RENDER INTERFACE SUCCESS DASHBOARD
