@@ -184,7 +184,7 @@ if not uploaded_file:
 # =============================================================================
 progress_bar = st.progress(0, text="📂 Loading transaction reports…")
 
-raw_sheets_dict: dict[str, pd.DataFrame] = {}
+raw_sheets_dict = {}
 try:
     if uploaded_file.name.endswith((".xlsx", ".xls")):
         xf = pd.ExcelFile(uploaded_file)
@@ -226,7 +226,7 @@ progress_bar.progress(25, text="📋 Loading custom Indian ASIN-SKU mapping list
 # =============================================================================
 # LOAD AND PARSE CUSTOM STN ASIN MAPPING FILE
 # =============================================================================
-custom_asin_sku_map: dict[str, str] = {}
+custom_asin_sku_map = {}
 if stn_mapping_file:
     try:
         if stn_mapping_file.name.endswith((".xlsx", ".xls")):
@@ -250,9 +250,9 @@ progress_bar.progress(40, text="📋 Mapping main product catalog fields…")
 # =============================================================================
 # MASTER CATALOG LIBRARIES PARSING
 # =============================================================================
-master_sku_hsn: dict[str, str] = {}
-master_sku_tax: dict[str, str] = {}
-master_hsn_tax: dict[str, str] = {}
+master_sku_hsn = {}
+master_sku_tax = {}
+master_hsn_tax = {}
 
 if attribute_file:
     try:
@@ -361,7 +361,7 @@ progress_bar.progress(75, text="🔍 Running global majority tax vote maps…")
 # =============================================================================
 # GLOBAL MAJORITY VOTE PRE-CALCULATION & COMPLIANCE RISK AUDITING
 # =============================================================================
-global_hsn_rates: dict[str, list[str]] = {}
+global_hsn_rates = {}
 for r in global_raw_records:
     h_healed = r["raw_hsn"]
     if not h_healed and r["clean_sku"] in master_sku_hsn: 
@@ -371,7 +371,7 @@ for r in global_raw_records:
     if h_healed and h_healed != "" and rt not in {"0", "0.0", ""}:
         global_hsn_rates.setdefault(h_healed, []).append(rt)
 
-global_majority_tax: dict[str, str] = {}
+global_majority_tax = {}
 for hsn, rates in global_hsn_rates.items():
     if rates: global_majority_tax[hsn] = max(set(rates), key=rates.count)
 
@@ -409,7 +409,7 @@ for r in global_raw_records:
     if h in master_hsn_tax:
         m_tax = master_hsn_tax[h]
         key = (h, rt)
-        if rt not in {"0", ""} and rt != m_tax and key not in _seen["wth"]:
+        if rt not in {"0", ""} and rt != m_tax && key not in _seen["wth"]:
             list_wrong_tax_hsn.append({"HSN": h, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wth"].add(key)
 
@@ -432,7 +432,7 @@ progress_bar.progress(85, text="🛠️ Commencing multi-sheet full healing pass
 # =============================================================================
 # PRODUCTION WORKBOOK CLEANING PHASE
 # =============================================================================
-sanitized_sheets: dict[str, pd.DataFrame] = {}
+sanitized_sheets = {}
 
 for sname, df_s in raw_sheets_dict.items():
     df_out = df_s.copy()
@@ -458,11 +458,9 @@ for sname, df_s in raw_sheets_dict.items():
         h_val = r["raw_hsn"]
         s_val = r["sku_display"]
         
-        # Cross-reference ASIN targets back to true catalog SKU descriptors for the download workbook
         if r["raw_asin_clean"] in custom_asin_sku_map:
             s_val = custom_asin_sku_map[r["raw_asin_clean"]]
             
-        # Complete full lookup heal targeting master files directly (Removes MISSING HSN values entirely)
         if not h_val or h_val == "":
             c_lookup_sku = deep_clean_sku(s_val)
             if c_lookup_sku in master_sku_hsn: 
@@ -609,4 +607,4 @@ with dl1: st.download_button(label="📥 Download Unified Side-by-Side Error Rep
 with dl2: st.download_button(label="📥 Download Sanitized Workbook", data=clean_bytes, file_name=f"CLEANED_{base_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
 
 st.write("### 📋 Sanitized Sheet Preview (first 50 rows)")
-st.dataframe(sanitized_sheets[list(sanitized_sheets.keys())[0]].head(50), use_container_widt
+st.dataframe(sanitized_sheets[list(sanitized_sheets.keys())[0]].head(50), use_container_width=True)
