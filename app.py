@@ -186,7 +186,7 @@ progress_bar = st.progress(0, text="📂 Loading transaction reports…")
 
 raw_sheets_dict: dict[str, pd.DataFrame] = {}
 try:
-    if uploaded_file.name.lower().endswith((".xlsx", ".xls")):
+    if uploaded_file.name.endswith((".xlsx", ".xls")):
         xf = pd.ExcelFile(uploaded_file)
         for sname in xf.sheet_names:
             raw_sheets_dict[sname] = clean_df_columns(
@@ -229,7 +229,7 @@ progress_bar.progress(25, text="📋 Loading custom Indian ASIN-SKU mapping list
 custom_asin_sku_map: dict[str, str] = {}
 if stn_mapping_file:
     try:
-        if stn_mapping_file.name.lower().endswith((".xlsx", ".xls")):
+        if stn_mapping_file.name.endswith((".xlsx", ".xls")):
             stn_m_df = clean_df_columns(pd.read_excel(stn_mapping_file, dtype=str))
         else:
             stn_m_df = clean_df_columns(pd.read_csv(stn_mapping_file, dtype=str, low_memory=False))
@@ -256,7 +256,7 @@ master_hsn_tax: dict[str, str] = {}
 
 if attribute_file:
     try:
-        if attribute_file.name.lower().endswith((".xlsx", ".xls")):
+        if attribute_file.name.endswith((".xlsx", ".xls")):
             attr_df = clean_df_columns(pd.read_excel(attribute_file, dtype=str))
         else:
             attr_df = clean_df_columns(
@@ -302,8 +302,8 @@ progress_bar.progress(60, text="🕵️ Evaluating raw layout data profiles for 
 # =============================================================================
 # BUILD UNMUTATED RAW DATA MASTER ARRAYS
 # =============================================================================
-global_raw_records: list[dict] = []
-discovered_mappings: list[str] = []
+global_raw_records = []
+discovered_mappings = []
 
 for sname, df_s in raw_sheets_dict.items():
     c = detect_columns_v2(df_s)
@@ -343,10 +343,12 @@ for sname, df_s in raw_sheets_dict.items():
         rate_str = str(int(total)) if total == int(total) else str(total)
         tx_status = str(row[c["tx_type"]]).strip().lower() if c["tx_type"] else ""
 
+        sku_disp_clean = rsku.replace('"', '').replace("'", "").replace("`", "").strip() if rsku else ""
+
         global_raw_records.append({
             "sheet":       sname,
             "df_idx":      df_idx,
-            "sku_display": rsku.replace(/[\"'`]/g, "").trim() if rsku else "",
+            "sku_display": sku_disp_clean,
             "clean_sku":   csku,
             "raw_asin_clean": rasin_clean,
             "raw_hsn":     hsn_dig,
@@ -456,7 +458,7 @@ for sname, df_s in raw_sheets_dict.items():
         h_val = r["raw_hsn"]
         s_val = r["sku_display"]
         
-        # Cross-reference ASIN targets back to true catalog SKU descriptors for the download packet
+        # Cross-reference ASIN targets back to true catalog SKU descriptors for the download workbook
         if r["raw_asin_clean"] in custom_asin_sku_map:
             s_val = custom_asin_sku_map[r["raw_asin_clean"]]
             
@@ -544,13 +546,9 @@ with pd.ExcelWriter(clean_buf, engine="xlsxwriter") as writer:
 clean_buf.seek(0)
 clean_bytes = clean_buf.getvalue()
 
-progress_bar.progress(100, text="✅ All done!")
-progress_bar.empty()
-
 # =============================================================================
-# UI — INTERFACE RESULTS HUB RENDERING
+# RESULTS HUD HUB RENDERING
 # =============================================================================
-
 with st.sidebar:
     st.header("📊 Audit Summary")
     st.metric("🔴 Missing HSN (SKUs)",  len(list_missing_hsn))
@@ -565,96 +563,50 @@ with st.sidebar:
         list_wrong_tax_hsn, list_wrong_hsn_sku, list_wrong_tax_sku,
     ]))
     st.metric("⚡ Total Issues", total_issues)
-    if total_issues == 0:
-        st.success("No compliance issues found!")
-    else:
-        st.warning(f"{total_issues} issues need attention.")
     st.divider()
     st.subheader("🎯 Column Detection")
-    for m in discovered_mappings:
-        st.markdown(m)
+    for m in discovered_mappings: st.markdown(m)
 
-st.success(
-    f"✅ Processed **{len(raw_sheets_dict)}** sheet(s) · "
-    f"**{len(global_raw_records)}** rows audited · "
-    f"**{len(master_sku_hsn)}** SKUs in catalog"
-)
-
+st.success(f"✅ Processed **{len(raw_sheets_dict)}** sheet(s) · **{len(global_raw_records)}** rows audited · **{len(master_sku_hsn)}** SKUs in catalog")
 cols = st.columns(6)
-labels = ["🔴 Missing HSN", "⚠️ Invalid Len", "🔁 Double Rate",
-          "❌ Wrong Tax/HSN", "🔀 Wrong HSN/SKU", "💸 Wrong GST"]
-counts = [len(list_missing_hsn), len(list_invalid_len), len(list_double_rates),
-          len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku)]
-for col, lbl, cnt in zip(cols, labels, counts):
+for col, lbl, cnt in zip(cols, ["🔴 Missing HSN", "⚠️ Invalid Len", "🔁 Double Rate", "❌ Wrong Tax/HSN", "🔀 Wrong HSN/SKU", "💸 Wrong GST"], [len(list_missing_hsn), len(list_invalid_len), len(list_double_rates), len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku)]):
     col.metric(lbl, cnt)
 
 st.divider()
+CAT_NOTE = "Upload a master catalog (Step 2) to enable this check."
 
 with st.expander(f"🔴 Missing HSN Codes — {len(list_missing_hsn)} SKU(s)", expanded=bool(list_missing_hsn)):
-    if list_missing_hsn:
-        st.dataframe(pd.DataFrame({"SKU": list_missing_hsn}), use_container_width=True, height=220)
-    else:
-        st.success("No missing HSN codes found.")
+    if list_missing_hsn: st.dataframe(pd.DataFrame({"SKU": list_missing_hsn}), use_container_width=True, height=220)
+    else: st.success("No missing HSN codes found.")
 
 with st.expander(f"⚠️ Invalid HSN Lengths — {len(list_invalid_len)}", expanded=False):
-    if list_invalid_len:
-        st.dataframe(pd.DataFrame(list_invalid_len), use_container_width=True, height=220)
-    else:
-        st.success("All HSN codes have valid lengths (6 or 8 digits).")
+    if list_invalid_len: st.dataframe(pd.DataFrame(list_invalid_len), use_container_width=True, height=220)
+    else: st.success("All HSN codes have valid lengths (6 or 8 digits).")
 
 with st.expander(f"🔁 Conflicting Tax Rates (Same HSN) — {len(list_double_rates)}", expanded=False):
-    if list_double_rates:
-        st.dataframe(pd.DataFrame(list_double_rates), use_container_width=True, height=220)
-    else:
-        st.success("No conflicting tax rates detected.")
+    if list_double_rates: st.dataframe(pd.DataFrame(list_double_rates), use_container_width=True, height=220)
+    else: st.success("No conflicting tax rates detected.")
 
 with st.expander(f"❌ Wrong Tax Rate (HSN-Based) — {len(list_wrong_tax_hsn)}", expanded=False):
-    if list_wrong_tax_hsn:
-        st.dataframe(pd.DataFrame(list_wrong_tax_hsn), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No HSN-based tax rate mismatches found.")
-    else:
-        st.info(CAT_NOTE)
+    if list_wrong_tax_hsn: st.dataframe(pd.DataFrame(list_wrong_tax_hsn), use_container_width=True, height=220)
+    elif attribute_file: st.success("No HSN-based tax rate mismatches found.")
+    else: st.info(CAT_NOTE)
 
 with st.expander(f"🔀 Wrong HSN per SKU — {len(list_wrong_hsn_sku)}", expanded=False):
-    if list_wrong_hsn_sku:
-        st.dataframe(pd.DataFrame(list_wrong_hsn_sku), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU→HSN mismatches found.")
-    else:
-        st.info(CAT_NOTE)
+    if list_wrong_hsn_sku: st.dataframe(pd.DataFrame(list_wrong_hsn_sku), use_container_width=True, height=220)
+    elif attribute_file: st.success("No SKU→HSN mismatches found.")
+    else: st.info(CAT_NOTE)
 
 with st.expander(f"💸 Incorrect GST Rate (SKU-Based) — {len(list_wrong_tax_sku)}", expanded=False):
-    if list_wrong_tax_sku:
-        st.dataframe(pd.DataFrame(list_wrong_tax_sku), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU-based GST rate errors found.")
-    else:
-        st.info(CAT_NOTE)
+    if list_wrong_tax_sku: st.dataframe(pd.DataFrame(list_wrong_tax_sku), use_container_width=True, height=220)
+    elif attribute_file: st.success("No SKU-based GST rate errors found.")
+    else: st.info(CAT_NOTE)
 
 st.divider()
-
 base_name = uploaded_file.name.rsplit(".", 1)[0]
 dl1, dl2 = st.columns(2)
-with dl1:
-    st.download_button(
-        label="📥 Download Unified Side-by-Side Error Report",
-        data=audit_bytes,
-        file_name=f"ERROR_REPORT_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="secondary",
-    )
-with dl2:
-    st.download_button(
-        label="📥 Download Sanitized Workbook",
-        data=clean_bytes,
-        file_name=f"CLEANED_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary",
-    )
+with dl1: st.download_button(label="📥 Download Unified Side-by-Side Error Report", data=audit_bytes, file_name=f"ERROR_REPORT_{base_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="secondary")
+with dl2: st.download_button(label="📥 Download Sanitized Workbook", data=clean_bytes, file_name=f"CLEANED_{base_name}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True, type="primary")
 
 st.write("### 📋 Sanitized Sheet Preview (first 50 rows)")
-first_sname = list(sanitized_sheets.keys())[0]
-st.dataframe(sanitized_sheets[first_sname].head(50), use_container_width=True)
+st.dataframe(sanitized_sheets[list(sanitized_sheets.keys())[0]].head(50), use_container_widt
