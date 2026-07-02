@@ -15,19 +15,19 @@ st.set_page_config(
 # =============================================================================
 
 def clean_df_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Normalize column headers; auto-detect header row when missing HSN/SKU cols."""
+    """Normalize column headers; auto-detect header row when missing HSN/SKU/ASIN cols."""
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
     df = df.reset_index(drop=True)          # Always ensure clean 0-based RangeIndex
 
     HSN_KW = {"hsn", "sac", "commodity", "nomenclature"}
-    SKU_KW = {"sku", "fsn", "seller-sku", "item-code", "product-id", "article"}
+    SKU_KW = {"sku", "fsn", "seller-sku", "item-code", "product-id", "article", "asin"}
 
     has_hsn = any(any(k in str(c).lower() for k in HSN_KW) for c in df.columns)
     has_sku = any(any(k in str(c).lower() for k in SKU_KW) for c in df.columns)
 
     if not (has_hsn or has_sku):
-        TRIGGERS = {"hsn", "hsn code", "hsn/sac", "sku", "seller sku", "fsn"}
+        TRIGGERS = {"hsn", "hsn code", "hsn/sac", "sku", "seller sku", "fsn", "asin", "asin code"}
         for idx, row in df.iterrows():
             vals = {str(v).strip().lower() for v in row.values if pd.notna(v)}
             if vals & TRIGGERS:
@@ -40,11 +40,11 @@ def clean_df_columns(df: pd.DataFrame) -> pd.DataFrame:
 def detect_columns_v2(df: pd.DataFrame) -> dict:
     """
     Two-pass prioritized column scanner. Ensures strong exact structural matches 
-    like true 'SKU' always override loose partial matches like 'FSN'.
+    override loose partial matches, and dynamically auto-detects ASIN columns.
     """
     c = {k: None for k in (
         "sku", "hsn", "cgst_rate", "sgst_rate",
-        "igst_rate", "order_id", "order_item_id", "tx_type",
+        "igst_rate", "order_id", "order_item_id", "tx_type", "asin"
     )}
     
     # PASS 1: Direct structural locks & explicit template hits (Flipkart/Amazon/Master Catalog)
@@ -52,12 +52,21 @@ def detect_columns_v2(df: pd.DataFrame) -> dict:
         cl = str(col).strip().lower()
         if cl == 'sku': c['sku'] = col
         if cl in ['hsn', 'hsn code', 'hsn/sac', 'producttaxcode', 'commodity code', 'hsn_code', 'hsncode']: c['hsn'] = col
+        if cl in ['asin', 'asin code', 'product-asin', 'item-asin', 'asin_code']: c['asin'] = col
         if cl == 'order id': c['order_id'] = col
         if cl == 'order item id': c['order_item_id'] = col
         if cl in ['cgst rate', 'cgst_rate']: c['cgst_rate'] = col
         if cl in ['sgst rate', 'sgst_rate', 'sgst rate (or utgst as applicable)']: c['sgst_rate'] = col
         if cl in ['igst rate', 'igst_rate']: c['igst_rate'] = col
         if cl in ['event type', 'document type', 'transaction type']: c['tx_type'] = col
+
+    # Heuristic: If name is custom, scan first 5 rows to auto-detect ASIN data streams
+    if not c['asin']:
+        for col in df.columns:
+            sample_vals = df[col].dropna().head(5).astype(str).str.strip().str.replace('`','').str.replace('"','')
+            if any(re.match(r'^B0[A-Z0-9]{8}$', v, re.IGNORECASE) for v in sample_vals):
+                c['asin'] = col
+                break
 
     # PASS 2: Universal fallback scanner for custom/shifted formats
     SKIP = {"tcs", "shipping", "gift", "wrap", "delivery", "postage", "cst", "vat", "cess", "tds", "amount", "amt", "value"}
@@ -66,7 +75,7 @@ def detect_columns_v2(df: pd.DataFrame) -> dict:
         if not c["sku"]:
             if any(k == cl for k in ("sku", "seller-sku", "item-code", "article-code", "wms_code")):
                 c["sku"] = col
-            elif any(k in cl for k in ("sku", "fsn", "product-id", "article", "fsn code")) and not any(x in cl for x in ['type', 'parent', 'accounting']):
+            elif any(k in cl for k in ("sku", "fsn", "product-id", "article", "fsn code")) and not any(x in cl for x in ['type', 'parent', 'accounting', 'parent_sku']):
                 c["sku"] = col
         if not c["hsn"]:
             if any(k in cl for k in ("hsn", "sac", "commodity", "nomenclature", "taxcode", "taxrule", "producttaxcode")):
@@ -205,14 +214,17 @@ for sname, df_s in raw_sheets_dict.items():
         )
 sales_lookup_df.drop_duplicates(subset=["Order ID", "Order Item ID"], inplace=True)
 
-progress_bar.progress(28, text="📋 Loading master catalog…")
+progress_bar.progress(28, text="📋 Mapping master catalog libraries and ASIN paths…")
 
 # =============================================================================
-# MASTER CATALOG LIBRARIES PARSING
+# MASTER CATALOG LIBRARIES PARSING (WITH ADVANCED ASIN TRACING)
 # =============================================================================
 master_sku_hsn: dict[str, str] = {}
 master_sku_tax: dict[str, str] = {}
 master_hsn_tax: dict[str, str] = {}
+master_asin_sku: dict[str, str] = {}
+master_asin_hsn: dict[str, str] = {}
+master_asin_tax: dict[str, str] = {}
 
 if attribute_file:
     try:
@@ -235,6 +247,8 @@ if attribute_file:
             for _, row in attr_df.iterrows():
                 r_hsn = normalize_hsn(row[attr_c["hsn"]]) if pd.notna(row[attr_c["hsn"]]) else ""
                 r_sku = deep_clean_sku(row[attr_c["sku"]])
+                orig_sku_str = str(row[attr_c["sku"]]).strip().replace('`','').replace('"','')
+                
                 r_tax = (
                     "".join(filter(str.isdigit, str(row[a_tax]).strip()))
                     if a_tax and pd.notna(row[a_tax])
@@ -245,10 +259,18 @@ if attribute_file:
                     if r_tax:
                         master_sku_tax[r_sku] = r_tax
                         master_hsn_tax[r_hsn] = r_tax
+
+                # Automated deep scanning to capture catalog ASIN reference records
+                for col in attr_df.columns:
+                    val_str = str(row[col]).strip().replace('`','').replace('"','').upper()
+                    if re.match(r'^B0[A-Z0-9]{8}$', val_str):
+                        master_asin_sku[val_str] = orig_sku_str
+                        if r_hsn: master_asin_hsn[val_str] = r_hsn
+                        if r_tax: master_asin_tax[val_str] = r_tax
     except Exception as err:
         st.warning(f"⚠️ Could not fully load master catalog: {err}")
 
-progress_bar.progress(42, text="🕵️ Processing raw layouts for global evaluation…")
+progress_bar.progress(42, text="🕵️ Processing raw layouts for unified global modes…")
 
 # =============================================================================
 # BUILD UNMUTATED RAW DATA MASTER ARRAYS
@@ -275,11 +297,30 @@ for sname, df_s in raw_sheets_dict.items():
     for pos, (df_idx, row) in enumerate(df_work.iterrows()):
         rhsn = str(row[c["hsn"]]).strip() if c["hsn"] and pd.notna(row[c["hsn"]]) else ""
         rsku = str(row[c["sku"]]).strip() if c["sku"] and pd.notna(row[c["sku"]]) else ""
+        rasin = str(row[c["asin"]]).strip() if c["asin"] and pd.notna(row[c["asin"]]) else ""
+
+        # Pre-clean ASIN text inputs
+        rasin_clean = rasin.upper().replace('"', '').replace("'", "").replace("`","").strip()
+        rsku_clean_upper = rsku.upper().replace('"', '').replace("'", "").replace("`","").strip()
+
+        # Catch instances where an ASIN string value is carrying inside the SKU header itself (STN Report profiles)
+        if re.match(r'^B0[A-Z0-9]{8}$', rsku_clean_upper):
+            if not rasin_clean: rasin_clean = rsku_clean_upper
+
+        # Resolve True Master SKU if mapped via ASIN index links
+        if rasin_clean in master_asin_sku:
+            rsku = master_asin_sku[rasin_clean]
 
         hsn_dig = normalize_hsn(rhsn)
-        sku_disp = re.sub(r'[^a-zA-Z0-9_\-]', '', rsku)
-        if sku_disp.upper().startswith("SKU:"):
-            sku_disp = sku_disp[4:]
+        csku = deep_clean_sku(rsku)
+
+        # Pre-flight lookup auto-healing logic
+        if not hsn_dig or hsn_dig == "":
+            if csku in master_sku_hsn: hsn_dig = master_sku_hsn[csku]
+            elif rasin_clean in master_asin_hsn: hsn_dig = master_asin_hsn[rasin_clean]
+
+        sku_disp = re.sub(r'^["\'`\s]+|["\'`\s]+$', "", rsku)
+        if sku_disp.upper().startswith("SKU:"): sku_disp = sku_disp[4:]
 
         total = igst_s.loc[df_idx] if igst_s.loc[df_idx] > 0 else (cgst_s.loc[df_idx] + sgst_s.loc[df_idx])
         rate_str = str(int(total)) if total == int(total) else str(total)
@@ -289,25 +330,20 @@ for sname, df_s in raw_sheets_dict.items():
             "sheet":       sname,
             "df_idx":      df_idx,
             "sku_display": sku_disp,
-            "clean_sku":   deep_clean_sku(rsku),
+            "clean_sku":   csku,
             "raw_hsn":     hsn_dig,
             "rate_str":    rate_str,
             "tx_status":   tx_status,
         })
 
-progress_bar.progress(58, text="🔍 Running global side-by-side compliance audits…")
+progress_bar.progress(58, text="🔍 Running global workbook compliance audits…")
 
 # =============================================================================
 # GLOBAL MAJORITY VOTE PRE-CALCULATION & COMPLIANCE RISK AUDITING
 # =============================================================================
 global_hsn_rates: dict[str, list[str]] = {}
 for r in global_raw_records:
-    h_healed = r["raw_hsn"]
-    if not h_healed and r["clean_sku"] in master_sku_hsn:
-        h_healed = master_sku_hsn[r["clean_sku"]]
-    else:
-        if not h_healed: h_healed = "MISSING HSN"
-
+    h_healed = r["raw_hsn"] or "MISSING HSN"
     rt = r["rate_str"]
     if h_healed != "MISSING HSN" and rt not in {"0", "0.0", ""}:
         global_hsn_rates.setdefault(h_healed, []).append(rt)
@@ -374,7 +410,7 @@ for r in global_raw_records:
             list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wts"].add(key)
 
-progress_bar.progress(72, text="🛠️ Overwriting records based on global validation pass…")
+progress_bar.progress(72, text="🛠️ Sanitizing columns and executing auto-healing routines…")
 
 # =============================================================================
 # PRODUCTION WORKBOOK CLEANING PHASE
@@ -386,6 +422,10 @@ for sname, df_s in raw_sheets_dict.items():
     c = detect_columns_v2(df_out)
     sheet_recs = [r for r in global_raw_records if r["sheet"] == sname]
 
+    # Force insert missing split tax parameters if absent natively from this sheet structure
+    if not c["sku"] and c["asin"]:
+        df_out['SKU'] = ""
+        c["sku"] = 'SKU'
     if not c["cgst_rate"]:
         df_out['CGST Rate'] = "0"
         c["cgst_rate"] = 'CGST Rate'
@@ -396,20 +436,14 @@ for sname, df_s in raw_sheets_dict.items():
         df_out['IGST Rate'] = "0"
         c["igst_rate"] = 'IGST Rate'
 
-    healed_hsns: list[str] = []
-    for r in sheet_recs:
-        if not r["raw_hsn"] and r["clean_sku"] in master_sku_hsn:
-            healed_hsns.append(master_sku_hsn[r["clean_sku"]])
-        else:
-            healed_hsns.append(r["raw_hsn"] or "MISSING HSN")
-
+    healed_hsns = [r["raw_hsn"] or "MISSING HSN" for r in sheet_recs]
     final_hsns  = [f'="{h}"' if h != "MISSING HSN" else "MISSING HSN" for h in healed_hsns]
     final_rates = [global_majority_tax.get(h, r["rate_str"]) for h, r in zip(healed_hsns, sheet_recs)]
+    final_skus  = [r["sku_display"] for r in sheet_recs]
 
-    if c["hsn"]:
-        df_out[c["hsn"]] = final_hsns
-    else:
-        df_out['HSN Code'] = final_hsns
+    if c["sku"]: df_out[c["sku"]] = final_skus
+    if c["hsn"]: df_out[c["hsn"]] = final_hsns
+    else: df_out['HSN Code'] = final_hsns
     df_out["Total Tax Rate"] = final_rates
 
     for pos, (df_idx, _) in enumerate(df_out.iterrows()):
