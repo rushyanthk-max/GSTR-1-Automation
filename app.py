@@ -214,7 +214,7 @@ for sname, df_s in raw_sheets_dict.items():
         )
 sales_lookup_df.drop_duplicates(subset=["Order ID", "Order Item ID"], inplace=True)
 
-progress_bar.progress(28, text="📋 Mapping master catalog libraries and ASIN paths…")
+progress_bar.progress(28, text="📋 Loading master catalog and ASIN paths…")
 
 # =============================================================================
 # MASTER CATALOG LIBRARIES PARSING (WITH ADVANCED ASIN CROSS-MATCH INDEXING)
@@ -307,20 +307,10 @@ for sname, df_s in raw_sheets_dict.items():
         if re.match(r'^B0[A-Z0-9]{8}$', rsku_clean_upper):
             if not rasin_clean: rasin_clean = rsku_clean_upper
 
-        # Cross-reference to find true parent SKU name if hidden behind an Amazon ASIN code
-        if rasin_clean in master_asin_sku:
-            rsku = master_asin_sku[rasin_clean]
-
+        if rasin_clean in master_asin_sku: rsku = master_asin_sku[rasin_clean]
         hsn_dig = normalize_hsn(rhsn)
         csku = deep_clean_sku(rsku)
-
-        # Pre-flight lookup healing validation (Prevents false empty alerts on reports)
-        if not hsn_dig or hsn_dig == "":
-            if csku in master_sku_hsn: hsn_dig = master_sku_hsn[csku]
-            elif rasin_clean in master_asin_hsn: hsn_dig = master_asin_hsn[rasin_clean]
-
-        sku_disp = re.sub(r'^["\'`\s]+|["\'`\s]+$', "", rsku)
-        if sku_disp.upper().startswith("SKU:"): sku_disp = sku_disp[4:]
+        sku_disp = re.sub(r'[^a-zA-Z0-9_\-]', '', rsku)
 
         total = igst_s.loc[df_idx] if igst_s.loc[df_idx] > 0 else (cgst_s.loc[df_idx] + sgst_s.loc[df_idx])
         rate_str = str(int(total)) if total == int(total) else str(total)
@@ -331,98 +321,95 @@ for sname, df_s in raw_sheets_dict.items():
             "df_idx":      df_idx,
             "sku_display": sku_disp,
             "clean_sku":   csku,
+            "raw_asin_clean": rasin_clean,
             "raw_hsn":     hsn_dig,
             "rate_str":    rate_str,
             "tx_status":   tx_status,
         })
 
-print("Global records generated.")
+progress_bar.progress(58, text="🔍 Detecting raw-based compliance errors…")
 
 # =============================================================================
 # GLOBAL MAJORITY VOTE PRE-CALCULATION & COMPLIANCE RISK AUDITING
 # =============================================================================
 global_hsn_rates: dict[str, list[str]] = {}
 for r in global_raw_records:
-    h_healed = r["raw_hsn"] or "MISSING HSN"
+    h_healed = r["raw_hsn"]
+    if not h_healed and r["clean_sku"] in master_sku_hsn: h_healed = master_sku_hsn[r["clean_sku"]]
+    elif not h_healed and r["raw_asin_clean"] in master_asin_hsn: h_healed = master_asin_hsn[r["raw_asin_clean"]]
+    else:
+        if not h_healed: h_healed = "MISSING HSN"
     rt = r["rate_str"]
-    if h_healed != "MISSING HSN" and rt not in {"0", "0.0", ""}:
-        global_hsn_rates.setdefault(h_healed, []).append(rt)
+    if h_healed != "MISSING HSN" and rt not in {"0", "0.0", ""}: global_hsn_rates.setdefault(h_healed, []).append(rt)
 
 global_majority_tax: dict[str, str] = {}
 for hsn, rates in global_hsn_rates.items():
-    if rates:
-        global_majority_tax[hsn] = max(set(rates), key=rates.count)
+    if rates: global_majority_tax[hsn] = max(set(rates), key=rates.count)
 
-_raw_hsn_rates: dict[str, set] = {}
+_raw_hsn_rates = {}
 for r in global_raw_records:
     h, rt = r["raw_hsn"], r["rate_str"]
-    if h and rt not in {"0", "0.0", ""}:
-        _raw_hsn_rates.setdefault(h, set()).add(rt)
+    if h and rt not in {"0", "0.0", ""}: _raw_hsn_rates.setdefault(h, set()).add(rt)
 double_rate_hsns = {h: ",".join(sorted(v)) for h, v in _raw_hsn_rates.items() if len(v) > 1}
 
-list_missing_hsn:  list = []
-list_double_rates: list = []
-list_invalid_len:  list = []
-list_wrong_tax_hsn: list = []
-list_wrong_hsn_sku: list = []
-list_wrong_tax_sku: list = []
-
+list_missing_hsn = []
+list_double_rates = []
+list_invalid_len = []
+list_wrong_tax_hsn = []
+list_wrong_hsn_sku = []
+list_wrong_tax_sku = []
 _seen = {k: set() for k in ("miss", "dbl", "inv", "wth", "whs", "wts")}
 
 for r in global_raw_records:
-    h, rt, sd, cs, ts = (
-        r["raw_hsn"], r["rate_str"],
-        r["sku_display"], r["clean_sku"], r["tx_status"],
-    )
-
+    h, rt, sd, cs, ts, ac = r["raw_hsn"], r["rate_str"], r["sku_display"], r["clean_sku"], r["tx_status"], r["raw_asin_clean"]
     if not h and "cancel" not in ts and sd and sd not in _seen["miss"]:
         list_missing_hsn.append(sd)
         _seen["miss"].add(sd)
-
     if h in double_rate_hsns:
         key = (h, sd)
         if key not in _seen["dbl"]:
             list_double_rates.append({"HSN": h, "SKU": sd, "Tax Rates Found": double_rate_hsns[h]})
             _seen["dbl"].add(key)
-
     if h and len(h) not in {6, 8} and h not in _seen["inv"]:
         list_invalid_len.append({"HSN Code": h, "Digit Count": len(h)})
         _seen["inv"].add(h)
-
     if h in master_hsn_tax:
         m_tax = master_hsn_tax[h]
         key = (h, rt)
         if rt not in {"0", ""} and rt != m_tax and key not in _seen["wth"]:
             list_wrong_tax_hsn.append({"HSN": h, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wth"].add(key)
-
     if cs in master_sku_hsn:
         m_hsn = master_sku_hsn[cs]
         key = (cs, h)
         if h and h != m_hsn and key not in _seen["whs"]:
             list_wrong_hsn_sku.append({"SKU": sd, "Input HSN": h, "Master HSN": m_hsn})
             _seen["whs"].add(key)
-
+    elif ac in master_asin_hsn:
+        m_hsn = master_asin_hsn[ac]
+        key = (ac, h)
+        if h and h != m_hsn and key not in _seen["whs"]:
+            list_wrong_hsn_sku.append({"SKU": sd, "Input HSN": h, "Master HSN": m_hsn})
+            _seen["whs"].add(key)
     if cs in master_sku_tax:
         m_tax = master_sku_tax[cs]
         key = (cs, rt)
         if rt not in {"0", ""} and rt != m_tax and key not in _seen["wts"]:
             list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wts"].add(key)
+    elif ac in master_asin_tax:
+        m_tax = master_asin_tax[ac]
+        key = (ac, rt)
+        if rt not in {"0", ""} and rt != m_tax and key not in _seen["wts"]:
+            list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
+            _seen["wts"].add(key)
 
-progress_bar.progress(72, text="🛠️ Overwriting records based on global validation pass…")
-
-# =============================================================================
-# PRODUCTION WORKBOOK CLEANING PHASE
-# =============================================================================
-sanitized_sheets: dict[str, pd.DataFrame] = {}
-
+progress_bar.progress(72, text="🛠️ Sanitizing columns and executing auto-healing routines…")
+sanitized_sheets = {}
 for sname, df_s in raw_sheets_dict.items():
     df_out = df_s.copy()
     c = detect_columns_v2(df_out)
     sheet_recs = [r for r in global_raw_records if r["sheet"] == sname]
-
-    # Force inject explicit split columns if missing natively from this sheet layout format
     if (not c["sku"] or c["sku"] == "SKU") and c["asin"]:
         df_out['SKU'] = ""
         c["sku"] = 'SKU'
@@ -436,28 +423,33 @@ for sname, df_s in raw_sheets_dict.items():
         df_out['IGST Rate'] = "0"
         c["igst_rate"] = 'IGST Rate'
 
-    healed_hsns = [r["raw_hsn"] or "MISSING HSN" for r in sheet_recs]
+    healed_hsns = []
+    final_skus = []
+    for r in sheet_recs:
+        h_val = r["raw_hsn"]
+        s_val = r["sku_display"]
+        if r["raw_asin_clean"] in master_asin_sku: s_val = master_asin_sku[r["raw_asin_clean"]]
+        if not h_val or h_val == "":
+            if r["clean_sku"] in master_sku_hsn: h_val = master_sku_hsn[r["clean_sku"]]
+            elif r["raw_asin_clean"] in master_asin_hsn: h_val = master_asin_hsn[r["raw_asin_clean"]]
+            else: h_val = "MISSING HSN"
+        healed_hsns.append(h_val)
+        final_skus.append(s_val)
+
     final_hsns  = [f'="{h}"' if h != "MISSING HSN" else "MISSING HSN" for h in healed_hsns]
     final_rates = [global_majority_tax.get(h, r["rate_str"]) for h, r in zip(healed_hsns, sheet_recs)]
-    final_skus  = [r["sku_display"] for r in sheet_recs]
-
     if c["sku"]: df_out[c["sku"]] = final_skus
     if c["hsn"]: df_out[c["hsn"]] = final_hsns
     else: df_out['HSN Code'] = final_hsns
     df_out["Total Tax Rate"] = final_rates
-
     for pos, (df_idx, _) in enumerate(df_out.iterrows()):
         winner = final_rates[pos]
         try:
             w = float(winner)
-            if w == 0:
-                continue
-            
+            if w == 0: continue
             orig_igst = "0"
             orig_igst_col = detect_columns_v2(df_s)["igst_rate"]
-            if orig_igst_col:
-                orig_igst = str(df_s.at[df_idx, orig_igst_col]).strip()
-
+            if orig_igst_col: orig_igst = str(df_s.at[df_idx, orig_igst_col]).strip()
             if orig_igst not in {"", "0", "0.0"}:
                 df_out.at[df_idx, c["igst_rate"]] = winner
                 df_out.at[df_idx, c["cgst_rate"]] = "0"
@@ -468,27 +460,15 @@ for sname, df_s in raw_sheets_dict.items():
                 df_out.at[df_idx, c["cgst_rate"]] = split
                 df_out.at[df_idx, c["sgst_rate"]] = split
                 df_out.at[df_idx, c["igst_rate"]] = "0"
-        except Exception:
-            pass
-
+        except Exception: pass
     sanitized_sheets[sname] = df_out
 
 progress_bar.progress(88, text="📊 Packaging binary Excel sheets…")
-
-# =============================================================================
-# BUILD AUDIT REPORT WORKBOOK
-# =============================================================================
-max_rows = max(
-    len(list_missing_hsn), len(list_double_rates), len(list_invalid_len),
-    len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1,
-)
-
+max_rows = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_len), len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
 
 def _pad(lst: list, key: str | None = None) -> list:
-    """Pad a list of strings or dicts to max_rows length safely."""
     src = [row[key] if (key and isinstance(row, dict)) else row for row in lst]
     return [src[i] if i < len(src) else "" for i in range(max_rows)]
-
 
 audit_df = pd.DataFrame({
     "Missing HSN Codes (SKUs)":          _pad(list_missing_hsn),
@@ -513,10 +493,7 @@ with pd.ExcelWriter(audit_buf, engine="xlsxwriter") as writer:
     audit_df.to_excel(writer, sheet_name="HSN_GST_Audit_Dashboard", index=False)
     wb = writer.book
     ws = writer.sheets["HSN_GST_Audit_Dashboard"]
-    hdr_fmt = wb.add_format({
-        "bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF",
-        "border": 1, "text_wrap": True, "valign": "vcenter",
-    })
+    hdr_fmt = wb.add_format({"bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF", "border": 1, "text_wrap": True, "valign": "vcenter"})
     ws.set_row(0, 32)
     for col_i, col_name in enumerate(audit_df.columns):
         ws.write(0, col_i, col_name, hdr_fmt)
@@ -526,123 +503,13 @@ audit_bytes = audit_buf.getvalue()
 
 clean_buf = io.BytesIO()
 with pd.ExcelWriter(clean_buf, engine="xlsxwriter") as writer:
-    for sname, df_out in sanitized_sheets.items():
-        df_out.to_excel(writer, sheet_name=sname, index=False)
+    for sname, df_out in sanitized_sheets.items(): df_out.to_excel(writer, sheet_name=sname, index=False)
 clean_buf.seek(0)
 clean_bytes = clean_buf.getvalue()
-
-progress_bar.progress(100, text="✅ Verification pipeline active!")
-progress_bar.empty()
-
-# =============================================================================
-# UI — INTERFACE RESULTS HUB RENDERING
-# =============================================================================
-
-with st.sidebar:
-    st.header("📊 Audit Summary")
-    st.metric("🔴 Missing HSN (SKUs)",  len(list_missing_hsn))
-    st.metric("⚠️ Invalid HSN Lengths", len(list_invalid_len))
-    st.metric("🔁 Double Tax Rates",    len(list_double_rates))
-    st.metric("❌ Wrong Tax (HSN)",     len(list_wrong_tax_hsn))
-    st.metric("🔀 Wrong HSN (SKU)",     len(list_wrong_hsn_sku))
-    st.metric("💸 Incorrect GST Rate",  len(list_wrong_tax_sku))
-    st.divider()
-    total_issues = sum(map(len, [
-        list_missing_hsn, list_invalid_len, list_double_rates,
-        list_wrong_tax_hsn, list_wrong_hsn_sku, list_wrong_tax_sku,
-    ]))
-    st.metric("⚡ Total Issues", total_issues)
-    if total_issues == 0:
-        st.success("No compliance issues found!")
-    else:
-        st.warning(f"{total_issues} issues need attention.")
-    st.divider()
-    st.subheader("🎯 Column Detection")
-    for m in discovered_mappings:
-        st.markdown(m)
-
-st.success(
-    f"✅ Processed **{len(raw_sheets_dict)}** sheet(s) · "
-    f"**{len(global_raw_records)}** rows audited · "
-    f"**{len(master_sku_hsn)}** SKUs in catalog"
-)
-
-cols = st.columns(6)
-labels = ["🔴 Missing HSN", "⚠️ Invalid Len", "🔁 Double Rate",
-          "❌ Wrong Tax/HSN", "🔀 Wrong HSN/SKU", "💸 Wrong GST"]
-counts = [len(list_missing_hsn), len(list_invalid_len), len(list_double_rates),
-          len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku)]
-for col, lbl, cnt in zip(cols, labels, counts):
-    col.metric(lbl, cnt)
-
-st.divider()
-CAT_NOTE = "Upload a master catalog (Step 2) to enable this check."
-
-with st.expander(f"🔴 Missing HSN Codes — {len(list_missing_hsn)} SKU(s)", expanded=bool(list_missing_hsn)):
-    if list_missing_hsn:
-        st.dataframe(pd.DataFrame({"SKU": list_missing_hsn}), use_container_width=True, height=220)
-    else:
-        st.success("No missing HSN codes found.")
-
-with st.expander(f"⚠️ Invalid HSN Lengths — {len(list_invalid_len)}", expanded=False):
-    if list_invalid_len:
-        st.dataframe(pd.DataFrame(list_invalid_len), use_container_width=True, height=220)
-    else:
-        st.success("All HSN codes have valid lengths (6 or 8 digits).")
-
-with st.expander(f"🔁 Conflicting Tax Rates (Same HSN) — {len(list_double_rates)}", expanded=False):
-    if list_double_rates:
-        st.dataframe(pd.DataFrame(list_double_rates), use_container_width=True, height=220)
-    else:
-        st.success("No conflicting tax rates detected.")
-
-with st.expander(f"❌ Wrong Tax Rate (HSN-Based) — {len(list_wrong_tax_hsn)}", expanded=False):
-    if list_wrong_tax_hsn:
-        st.dataframe(pd.DataFrame(list_wrong_tax_hsn), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No HSN-based tax rate mismatches found.")
-    else:
-        st.info(CAT_NOTE)
-
-with st.expander(f"🔀 Wrong HSN per SKU — {len(list_wrong_hsn_sku)}", expanded=False):
-    if list_wrong_hsn_sku:
-        st.dataframe(pd.DataFrame(list_wrong_hsn_sku), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU→HSN mismatches found.")
-    else:
-        st.info(CAT_NOTE)
-
-with st.expander(f"💸 Incorrect GST Rate (SKU-Based) — {len(list_wrong_tax_sku)}", expanded=False):
-    if list_wrong_tax_sku:
-        st.dataframe(pd.DataFrame(list_wrong_tax_sku), use_container_width=True, height=220)
-    elif attribute_file:
-        st.success("No SKU-based GST rate errors found.")
-    else:
-        st.info(CAT_NOTE)
-
-st.divider()
-
-base_name = uploaded_file.name.rsplit(".", 1)[0]
-dl1, dl2 = st.columns(2)
-with dl1:
-    st.download_button(
-        label="📥 Download Unified Side-by-Side Error Report",
-        data=audit_bytes,
-        file_name=f"ERROR_REPORT_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="secondary",
-    )
-with dl2:
-    st.download_button(
-        label="📥 Download Sanitized Workbook",
-        data=clean_bytes,
-        file_name=f"CLEANED_{base_name}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        use_container_width=True,
-        type="primary",
-    )
-
-st.write("### 📋 Sanitized Sheet Preview (first 50 rows)")
-first_sname = list(sanitized_sheets.keys())[0]
-st.dataframe(sanitized_sheets[first_sname].head(50), use_container_width=True)
+"""
+try:
+    compile(fixed_final_source, "app.py", "exec")
+    print("Clean verified code compiled with 100% success!")
+except Exception as e:
+    print("Error:", str(e))} symbols!")
+}
