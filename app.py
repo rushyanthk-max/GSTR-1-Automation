@@ -404,7 +404,7 @@ for r in global_raw_records:
             list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wts"].add(key)
 
-progress_bar.progress(72, text="🛠️ Sanitizing columns and executing auto-healing routines…")
+progress_bar.progress(72, text="🛠️ Sanitizing workbook…")
 sanitized_sheets = {}
 for sname, df_s in raw_sheets_dict.items():
     df_out = df_s.copy()
@@ -463,12 +463,22 @@ for sname, df_s in raw_sheets_dict.items():
         except Exception: pass
     sanitized_sheets[sname] = df_out
 
-progress_bar.progress(88, text="📊 Packaging binary Excel sheets…")
-max_rows = max(len(list_missing_hsn), len(list_double_rates), len(list_invalid_len), len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1)
+progress_bar.progress(88, text="📊 Generating Excel reports…")
+
+# =============================================================================
+# BUILD AUDIT REPORT EXCEL
+# =============================================================================
+max_rows = max(
+    len(list_missing_hsn), len(list_double_rates), len(list_invalid_len),
+    len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku), 1,
+)
+
 
 def _pad(lst: list, key: str | None = None) -> list:
+    """Pad a list of strings or dicts to max_rows length."""
     src = [row[key] if (key and isinstance(row, dict)) else row for row in lst]
     return [src[i] if i < len(src) else "" for i in range(max_rows)]
+
 
 audit_df = pd.DataFrame({
     "Missing HSN Codes (SKUs)":          _pad(list_missing_hsn),
@@ -493,7 +503,10 @@ with pd.ExcelWriter(audit_buf, engine="xlsxwriter") as writer:
     audit_df.to_excel(writer, sheet_name="HSN_GST_Audit_Dashboard", index=False)
     wb = writer.book
     ws = writer.sheets["HSN_GST_Audit_Dashboard"]
-    hdr_fmt = wb.add_format({"bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF", "border": 1, "text_wrap": True, "valign": "vcenter"})
+    hdr_fmt = wb.add_format({
+        "bold": True, "bg_color": "#1F3864", "font_color": "#FFFFFF",
+        "border": 1, "text_wrap": True, "valign": "vcenter",
+    })
     ws.set_row(0, 32)
     for col_i, col_name in enumerate(audit_df.columns):
         ws.write(0, col_i, col_name, hdr_fmt)
@@ -501,15 +514,126 @@ with pd.ExcelWriter(audit_buf, engine="xlsxwriter") as writer:
 audit_buf.seek(0)
 audit_bytes = audit_buf.getvalue()
 
+# Sanitized workbook
 clean_buf = io.BytesIO()
 with pd.ExcelWriter(clean_buf, engine="xlsxwriter") as writer:
-    for sname, df_out in sanitized_sheets.items(): df_out.to_excel(writer, sheet_name=sname, index=False)
+    for sname, df_out in sanitized_sheets.items():
+        df_out.to_excel(writer, sheet_name=sname, index=False)
 clean_buf.seek(0)
 clean_bytes = clean_buf.getvalue()
-"""
-try:
-    compile(fixed_final_source, "app.py", "exec")
-    print("Clean verified code compiled with 100% success!")
-except Exception as e:
-    print("Error:", str(e))} symbols!")
-}
+
+progress_bar.progress(100, text="✅ All done!")
+progress_bar.empty()
+
+# =============================================================================
+# UI — RESULTS DASHBOARD
+# =============================================================================
+
+with st.sidebar:
+    st.header("📊 Audit Summary")
+    st.metric("🔴 Missing HSN (SKUs)",  len(list_missing_hsn))
+    st.metric("⚠️ Invalid HSN Lengths", len(list_invalid_len))
+    st.metric("🔁 Double Tax Rates",    len(list_double_rates))
+    st.metric("❌ Wrong Tax (HSN)",     len(list_wrong_tax_hsn))
+    st.metric("🔀 Wrong HSN (SKU)",     len(list_wrong_hsn_sku))
+    st.metric("💸 Incorrect GST Rate",  len(list_wrong_tax_sku))
+    st.divider()
+    total_issues = sum(map(len, [
+        list_missing_hsn, list_invalid_len, list_double_rates,
+        list_wrong_tax_hsn, list_wrong_hsn_sku, list_wrong_tax_sku,
+    ]))
+    st.metric("⚡ Total Issues", total_issues)
+    if total_issues == 0:
+        st.success("No compliance issues found!")
+    else:
+        st.warning(f"{total_issues} issues need attention.")
+    st.divider()
+    st.subheader("🎯 Column Detection")
+    for m in discovered_mappings:
+        st.markdown(m)
+
+st.success(
+    f"✅ Processed **{len(raw_sheets_dict)}** sheet(s) · "
+    f"**{len(global_raw_records)}** rows audited · "
+    f"**{len(master_sku_hsn)}** SKUs in catalog"
+)
+
+cols = st.columns(6)
+labels = ["🔴 Missing HSN", "⚠️ Invalid Len", "🔁 Double Rate",
+          "❌ Wrong Tax/HSN", "🔀 Wrong HSN/SKU", "💸 Wrong GST"]
+counts = [len(list_missing_hsn), len(list_invalid_len), len(list_double_rates),
+          len(list_wrong_tax_hsn), len(list_wrong_hsn_sku), len(list_wrong_tax_sku)]
+for col, lbl, cnt in zip(cols, labels, counts):
+    col.metric(lbl, cnt)
+
+st.divider()
+CAT_NOTE = "Upload a master catalog (Step 2) to enable this check."
+
+with st.expander(f"🔴 Missing HSN Codes — {len(list_missing_hsn)} SKU(s)", expanded=bool(list_missing_hsn)):
+    if list_missing_hsn:
+        st.dataframe(pd.DataFrame({"SKU": list_missing_hsn}), use_container_width=True, height=220)
+    else:
+        st.success("No missing HSN codes found.")
+
+with st.expander(f"⚠️ Invalid HSN Lengths — {len(list_invalid_len)}", expanded=False):
+    if list_invalid_len:
+        st.dataframe(pd.DataFrame(list_invalid_len), use_container_width=True, height=220)
+    else:
+        st.success("All HSN codes have valid lengths (6 or 8 digits).")
+
+with st.expander(f"🔁 Conflicting Tax Rates (Same HSN) — {len(list_double_rates)}", expanded=False):
+    if list_double_rates:
+        st.dataframe(pd.DataFrame(list_double_rates), use_container_width=True, height=220)
+    else:
+        st.success("No conflicting tax rates detected.")
+
+with st.expander(f"❌ Wrong Tax Rate (HSN-Based) — {len(list_wrong_tax_hsn)}", expanded=False):
+    if list_wrong_tax_hsn:
+        st.dataframe(pd.DataFrame(list_wrong_tax_hsn), use_container_width=True, height=220)
+    elif attribute_file:
+        st.success("No HSN-based tax rate mismatches found.")
+    else:
+        st.info(CAT_NOTE)
+
+with st.expander(f"🔀 Wrong HSN per SKU — {len(list_wrong_hsn_sku)}", expanded=False):
+    if list_wrong_hsn_sku:
+        st.dataframe(pd.DataFrame(list_wrong_hsn_sku), use_container_width=True, height=220)
+    elif attribute_file:
+        st.success("No SKU→HSN mismatches found.")
+    else:
+        st.info(CAT_NOTE)
+
+with st.expander(f"💸 Incorrect GST Rate (SKU-Based) — {len(list_wrong_tax_sku)}", expanded=False):
+    if list_wrong_tax_sku:
+        st.dataframe(pd.DataFrame(list_wrong_tax_sku), use_container_width=True, height=220)
+    elif attribute_file:
+        st.success("No SKU-based GST rate errors found.")
+    else:
+        st.info(CAT_NOTE)
+
+st.divider()
+
+base_name = uploaded_file.name.rsplit(".", 1)[0]
+dl1, dl2 = st.columns(2)
+with dl1:
+    st.download_button(
+        label="📥 Download Unified Side-by-Side Error Report",
+        data=audit_bytes,
+        file_name=f"ERROR_REPORT_{base_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="secondary",
+    )
+with dl2:
+    st.download_button(
+        label="📥 Download Sanitized Workbook",
+        data=clean_bytes,
+        file_name=f"CLEANED_{base_name}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        type="primary",
+    )
+
+st.write("### 📋 Sanitized Sheet Preview (first 50 rows)")
+first_sname = list(sanitized_sheets.keys())[0]
+st.dataframe(sanitized_sheets[first_sname].head(50), use_container_width=True)
