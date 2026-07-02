@@ -60,7 +60,7 @@ def detect_columns_v2(df: pd.DataFrame) -> dict:
         if cl in ['igst rate', 'igst_rate']: c['igst_rate'] = col
         if cl in ['event type', 'document type', 'transaction type']: c['tx_type'] = col
 
-    # Heuristic: If name is custom, scan first 5 rows to auto-detect ASIN data streams
+    # Heuristic: Scan first 5 rows to auto-detect any un-mapped custom ASIN data streams
     if not c['asin']:
         for col in df.columns:
             sample_vals = df[col].dropna().head(5).astype(str).str.strip().str.replace('`','').str.replace('"','')
@@ -68,7 +68,7 @@ def detect_columns_v2(df: pd.DataFrame) -> dict:
                 c['asin'] = col
                 break
 
-    # PASS 2: Universal fallback scanner for custom/shifted formats
+    # PASS 2: Universal fallback scanner for custom formats
     SKIP = {"tcs", "shipping", "gift", "wrap", "delivery", "postage", "cst", "vat", "cess", "tds", "amount", "amt", "value"}
     for col in df.columns:
         cl = str(col).strip().lower()
@@ -149,7 +149,7 @@ def normalize_hsn(val) -> str:
 st.title("📦 BCPL Universal E-commerce GST Sanitizer & Auditor")
 st.caption(
     "Upload your files to clean multi-sheet workbooks and generate a unified "
-    "side-by-side Audit Error Report."
+    "side-by-side Audit Error Report based on raw inputs."
 )
 
 up_col1, up_col2 = st.columns(2)
@@ -217,7 +217,7 @@ sales_lookup_df.drop_duplicates(subset=["Order ID", "Order Item ID"], inplace=Tr
 progress_bar.progress(28, text="📋 Mapping master catalog libraries and ASIN paths…")
 
 # =============================================================================
-# MASTER CATALOG LIBRARIES PARSING (WITH ADVANCED ASIN TRACING)
+# MASTER CATALOG LIBRARIES PARSING (WITH ADVANCED ASIN CROSS-MATCH INDEXING)
 # =============================================================================
 master_sku_hsn: dict[str, str] = {}
 master_sku_tax: dict[str, str] = {}
@@ -260,7 +260,7 @@ if attribute_file:
                         master_sku_tax[r_sku] = r_tax
                         master_hsn_tax[r_hsn] = r_tax
 
-                # Automated deep scanning to capture catalog ASIN reference records
+                # Automated deep scanning across all columns to register ASIN string pointers natively
                 for col in attr_df.columns:
                     val_str = str(row[col]).strip().replace('`','').replace('"','').upper()
                     if re.match(r'^B0[A-Z0-9]{8}$', val_str):
@@ -268,9 +268,9 @@ if attribute_file:
                         if r_hsn: master_asin_hsn[val_str] = r_hsn
                         if r_tax: master_asin_tax[val_str] = r_tax
     except Exception as err:
-        st.warning(f"⚠️ Could not fully load master catalog: {err}")
+        st.warning(f"⚠️ Could not fully map master catalog cross-references: {err}")
 
-progress_bar.progress(42, text="🕵️ Processing raw layouts for unified global modes…")
+progress_bar.progress(42, text="🕵️ Processing raw layout details for workbook validation…")
 
 # =============================================================================
 # BUILD UNMUTATED RAW DATA MASTER ARRAYS
@@ -299,22 +299,22 @@ for sname, df_s in raw_sheets_dict.items():
         rsku = str(row[c["sku"]]).strip() if c["sku"] and pd.notna(row[c["sku"]]) else ""
         rasin = str(row[c["asin"]]).strip() if c["asin"] and pd.notna(row[c["asin"]]) else ""
 
-        # Pre-clean ASIN text inputs
+        # Pre-clean identifier inputs
         rasin_clean = rasin.upper().replace('"', '').replace("'", "").replace("`","").strip()
         rsku_clean_upper = rsku.upper().replace('"', '').replace("'", "").replace("`","").strip()
 
-        # Catch instances where an ASIN string value is carrying inside the SKU header itself (STN Report profiles)
+        # Route ASIN inputs if carried directly inside the primary SKU column
         if re.match(r'^B0[A-Z0-9]{8}$', rsku_clean_upper):
             if not rasin_clean: rasin_clean = rsku_clean_upper
 
-        # Resolve True Master SKU if mapped via ASIN index links
+        # Cross-reference to find true parent SKU name if hidden behind an Amazon ASIN code
         if rasin_clean in master_asin_sku:
             rsku = master_asin_sku[rasin_clean]
 
         hsn_dig = normalize_hsn(rhsn)
         csku = deep_clean_sku(rsku)
 
-        # Pre-flight lookup auto-healing logic
+        # Pre-flight lookup healing validation (Prevents false empty alerts on reports)
         if not hsn_dig or hsn_dig == "":
             if csku in master_sku_hsn: hsn_dig = master_sku_hsn[csku]
             elif rasin_clean in master_asin_hsn: hsn_dig = master_asin_hsn[rasin_clean]
@@ -336,7 +336,7 @@ for sname, df_s in raw_sheets_dict.items():
             "tx_status":   tx_status,
         })
 
-progress_bar.progress(58, text="🔍 Running global workbook compliance audits…")
+print("Global records generated.")
 
 # =============================================================================
 # GLOBAL MAJORITY VOTE PRE-CALCULATION & COMPLIANCE RISK AUDITING
@@ -410,7 +410,7 @@ for r in global_raw_records:
             list_wrong_tax_sku.append({"SKU": sd, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wts"].add(key)
 
-progress_bar.progress(72, text="🛠️ Sanitizing columns and executing auto-healing routines…")
+progress_bar.progress(72, text="🛠️ Overwriting records based on global validation pass…")
 
 # =============================================================================
 # PRODUCTION WORKBOOK CLEANING PHASE
@@ -422,8 +422,8 @@ for sname, df_s in raw_sheets_dict.items():
     c = detect_columns_v2(df_out)
     sheet_recs = [r for r in global_raw_records if r["sheet"] == sname]
 
-    # Force insert missing split tax parameters if absent natively from this sheet structure
-    if not c["sku"] and c["asin"]:
+    # Force inject explicit split columns if missing natively from this sheet layout format
+    if (not c["sku"] or c["sku"] == "SKU") and c["asin"]:
         df_out['SKU'] = ""
         c["sku"] = 'SKU'
     if not c["cgst_rate"]:
