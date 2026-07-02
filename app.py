@@ -287,11 +287,9 @@ if attribute_file:
                         master_sku_tax[r_sku] = r_tax
                         master_hsn_tax[r_hsn] = r_tax
 
-                # Internal model search to ensure standard ASIN strings cross-reference if present in master
                 for col in attr_df.columns:
                     val_str = str(row[col]).strip().replace('`','').replace('"','').upper()
                     if re.match(r'^B0[A-Z0-9]{8}$', val_str) and r_sku:
-                        # Fallback mapping if no custom sheet is uploaded
                         if val_str not in custom_asin_sku_map:
                             custom_asin_sku_map[val_str] = str(row[attr_c["sku"]]).strip().replace('`','').replace('"','')
     except Exception as err:
@@ -332,7 +330,6 @@ for sname, df_s in raw_sheets_dict.items():
         if re.match(r'^B0[A-Z0-9]{8}$', rsku_clean_upper):
             if not rasin_clean: rasin_clean = rsku_clean_upper
 
-        # Resolve true custom mapping links to identify true catalog properties before evaluation
         if rasin_clean in custom_asin_sku_map:
             rsku = custom_asin_sku_map[rasin_clean]
 
@@ -409,7 +406,7 @@ for r in global_raw_records:
     if h in master_hsn_tax:
         m_tax = master_hsn_tax[h]
         key = (h, rt)
-        if rt not in {"0", ""} and rt != m_tax && key not in _seen["wth"]:
+        if rt not in {"0", ""} and rt != m_tax and key not in _seen["wth"]:
             list_wrong_tax_hsn.append({"HSN": h, "Input Rate": rt, "Master Rate": m_tax})
             _seen["wth"].add(key)
 
